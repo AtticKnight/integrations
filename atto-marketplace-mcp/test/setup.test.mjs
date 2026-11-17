@@ -11,6 +11,8 @@ import { AttoPrivateKey } from '@attocash/commons-core';
 import { hexBytes, offchainSign, upperHex } from '@attocash/atto-marketplace-nano-adapter/protocol';
 const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(import.meta.dirname,'..');
 const { runSetup: runSetupCommand }=await import(pathToFileURL(join(packageDirectory,'dist/setup.js')).href);
+// JSON contract scenarios explicitly select machine-readable terminal results.
+const runJsonSetupCommand=(argv,env)=>runSetupCommand([...argv,'--json'],env);
 const { MarketplaceProfileStore }=await import(pathToFileURL(join(packageDirectory,'dist/profile-store.js')).href);
 const { approvalRequestDigest, writeApprovalRequest }=await import(pathToFileURL(join(packageDirectory,'dist/approval-files.js')).href);
 const { shellQuote }=await import(pathToFileURL(join(packageDirectory,'dist/shell-quote.js')).href);
@@ -33,15 +35,15 @@ async function runApprovedSetup(argv, env) {
     if(pending?.state==='LOGIN_APPROVAL') await approveFixtureLogin(home,JSON.parse(pending.privatePayload).request,env);
   }
   let output='';const originalWrite=process.stdout.write;
-  process.stdout.write=chunk=>{output+=String(chunk);return true;};
-  try{await runSetupCommand(argv,env);}finally{process.stdout.write=originalWrite;}
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
+  try{await runJsonSetupCommand(argv,env);}finally{process.stdout.write=originalWrite;}
   const result=output.trim()?JSON.parse(output.trim()):undefined;
   if(result?.status==='approval_required') {
     const store=await MarketplaceProfileStore.open(home);let saved;
     try{saved=JSON.parse(store.getSetupState(profileId).privatePayload);}finally{store.close();}
     if(saved.request?.purpose==='login') {
       await approveFixtureLogin(home,saved.request,env);
-      await runSetupCommand(['--profile',profileId,'--home',home,'--complete'],env);
+      await runJsonSetupCommand(['--profile',profileId,'--home',home,'--complete'],env);
       return;
     }
   }
@@ -68,17 +70,23 @@ test('explicit setup prepares a typed login handoff without signing or submittin
     // When explicit setup begins, it only prepares an immutable typed approval.
     const args=['--profile','agent','--home',home,'--origin',http.origin,
       '--audience','marketplace','--controller-address',controllerAddress,'--controller-index','7','--mode','controller-session'];
-    const output=await withoutSetupOutput(()=>runSetupCommand(args,{MARKETPLACE_MCP_WALLET_HOST_COMMAND:'/never-run-a-raw-signer'}));
+    const output=await withoutSetupOutput(()=>runJsonSetupCommand(args,{MARKETPLACE_MCP_WALLET_HOST_COMMAND:'/never-run-a-raw-signer'}));
     const result=JSON.parse(output.trim());assert.equal(result.status,'approval_required');
     const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(join(packageDirectory,'dist/main.js'))}`;
     const requestPath=join(home,'approvals','agent',`${result.handoffId}.request.json`);
     assert.equal(result.walletCommand,`${command} approve ${shellQuote(requestPath)} --home ${shellQuote(home)}`);
     assert.equal(result.resumeCommand,`${command} setup --profile agent --complete --home ${shellQuote(home)}`);
     // Then no native key store or session endpoint has been reached and --status prints the same owner command.
-    await assert.rejects(runSetupCommand(args,{}),error=>error.code==='SETUP_IN_PROGRESS'&&error.message.endsWith(result.resumeCommand));
+    await assert.rejects(runJsonSetupCommand(args,{}),error=>error.code==='SETUP_IN_PROGRESS'&&error.message.endsWith(result.resumeCommand));
     assert.deepEqual(requests,['/v1/agent/auth/challenges']);
-    const status=JSON.parse((await withoutSetupOutput(()=>runSetupCommand(['--profile','agent','--home',home,'--status'],{}))).trim());
+    const status=JSON.parse((await withoutSetupOutput(()=>runJsonSetupCommand(['--profile','agent','--home',home,'--status'],{}))).trim());
     assert.equal(status.status,'LOGIN_APPROVAL');assert.equal(status.walletCommand,result.walletCommand);
+    // When the same pending setup is inspected without a JSON flag.
+    const readable=await withoutSetupOutput(()=>runSetupCommand(['--profile','agent','--home',home,'--status'],{}));
+    // Then public status and the exact next command are readable, with no credentials or JSON object.
+    assert.match(readable,/Status: LOGIN_APPROVAL/);assert.ok(readable.includes('Approve with: '));
+    assert.doesNotMatch(readable,/^\s*\{|accessToken|refreshToken|signature/m);
+
     const store=await MarketplaceProfileStore.open(home);
     try{assert.deepEqual(store.listProfileIds(),[]);}finally{store.close();}
   }finally{await stopSetupServer(http);await rm(root,{recursive:true,force:true});}
@@ -98,7 +106,7 @@ test('local setup consumes its exact typed login approval and stores only the se
     XDG_RUNTIME_DIR:'/tmp/fixture-runtime', MARKETPLACE_MCP_BEARER_TOKEN:'never-forward-marketplace-credential'};
   let output='';
   const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     // When setup first runs, its private local ATTO signer signs the exact challenge and creates a controller session.
     await runApprovedSetup(['--profile','agent','--home',home,'--origin',http.origin,'--audience','marketplace',
@@ -171,7 +179,7 @@ test('definitive signer failures keep the exact login setup retryable without sa
     const home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-setup-signer-retry-'));
     const env=await fakeAttoSigner(home);
     const originalWrite=process.stdout.write;
-    let output=''; process.stdout.write=chunk=>{output+=String(chunk);return true;};
+    let output=''; process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
     try {
       // When the first LOGIN submission fails at the signer.
       await assert.rejects(runApprovedSetup(['--profile','retryable','--home',home,'--origin',http.origin,'--audience','marketplace',
@@ -200,8 +208,8 @@ test('definitive signer failures keep the exact login setup retryable without sa
   }
 });
 
-test('stored login approval preserves its exact payload and signed response across definitive signer failure', async () => {
-  // Given an existing private typed LOGIN approval that predates headless setup.
+test('stored login approval preserves its exact current payload and signed response across definitive signer failure', async () => {
+  // Given a current private typed LOGIN approval and its exact signed response.
   for (const [status,serverCode,expectedCode] of [
     [503,'signer_unavailable','SIGNER_UNAVAILABLE'],
     [403,'signer_request_rejected','SIGNER_REQUEST_REJECTED'],
@@ -222,7 +230,7 @@ test('stored login approval preserves its exact payload and signed response acro
       action:{kind:'login',network:'ATTO',address:controllerAddress},
       challenge:{challengeId:challenge.challengeId,message:challenge.message,issuedAt:challenge.issuedAt,expiresAt:challenge.expiresAt}};
     const payload=JSON.stringify({profileId,origin:http.origin,audience:'marketplace',controllerNetwork:'ATTO',
-      controllerAddress,controllerIndex:7,mode:'controller-session',request});
+      controllerAddress,controllerIndex:7,mode:'controller-session',challenge,request});
     const initial=await MarketplaceProfileStore.open(home);
     try { initial.createSetupState(profileId,'LOGIN_APPROVAL',payload); } finally { initial.close(); }
     await writeApprovalRequest(home,profileId,handoffId,request);
@@ -230,7 +238,7 @@ test('stored login approval preserves its exact payload and signed response acro
     const responsePath=join(home,'approvals',profileId,`${handoffId}.response.json`);
     const originalResponse=await readFile(responsePath,'utf8');
     const originalWrite=process.stdout.write;
-    let output=''; process.stdout.write=chunk=>{output+=String(chunk);return true;};
+    let output=''; process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
     try {
       // When a definitively rejected submission is resumed with the original saved approval.
       await assert.rejects(runApprovedSetup(['--profile',profileId,'--home',home,'--complete'],{}),error=>error.code===expectedCode);
@@ -317,7 +325,7 @@ test('local Nano controller setup consumes the typed NOMS login handoff without 
   const home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-setup-nano-'));
   const signerEnv=await fakeNanoSigner(home,{origin:http.origin,address:nanoAddress,index:19,message:challenge.message});
   let output=''; const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     // When the profile selects NANO, the signer receives only the exact proof context and no private key material.
     await runApprovedSetup(['--profile','nano-agent','--home',home,'--origin',http.origin,'--audience','marketplace',
@@ -374,7 +382,7 @@ for(const network of ['ATTO','NANO'])test(`${network} scoped setup signs a fresh
   const signerEnv=await fakeAttoSigner(home);
   let output='';
   const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     await runApprovedSetup(['--profile','agent','--home',home,'--origin',http.origin,'--audience','marketplace',
       '--controller-network',network,'--controller-address',selectedAddress,'--controller-index','0','--mode','scoped-api-key',
@@ -437,7 +445,7 @@ test('scoped setup accepts and privately stores separate product publication res
   const home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-setup-product-publish-'));
   const signerEnv=await fakeAttoSigner(home);
   let output='';const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     // When setup runs the typed challenge and completes in a separate profile-ready step.
     await runApprovedSetup(['--profile','seller-key','--home',home,'--origin',http.origin,'--audience','marketplace',
@@ -484,7 +492,7 @@ test('credential activation creates a separate explicit scoped profile and remov
     store.putIssuedCredential('controller',{apiKeyId,apiKey:'private-scoped-key-value',scopes:['tasks:read'],publishAttoLimit:null,publishXnoLimit:null,});
   } finally { store.close(); }
   let output=''; const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     // When local setup activates the key, it creates a new scoped profile and never changes controller authority.
     await runApprovedSetup(['--profile','worker-key','--home',home,'--from-profile','controller','--credential-id',apiKeyId],{});
@@ -531,7 +539,7 @@ test('local setup rejects an invalid ATTO signature before session submission an
   const home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-setup-invalid-signature-'));
   const signerEnv=await fakeAttoSigner(home);
   let output=''; const originalWrite=process.stdout.write;
-  process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+  process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try {
     const args=['--profile','retryable','--home',home,'--origin',http.origin,'--audience','marketplace',
       '--controller-address',controllerAddress,'--controller-index','7','--mode','controller-session'];
@@ -664,7 +672,7 @@ function reauthProfile(origin, extra={}) {
     accessExpiresAt:Date.now()-1000,refreshToken:'old-refresh-token-secret',refreshExpiresAt:Date.now()-500,...extra};
 }
 async function withoutSetupOutput(action) {
-  let output='';const write=process.stdout.write;process.stdout.write=chunk=>{output+=String(chunk);return true;};
+  let output='';const write=process.stdout.write;process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return write.call(process.stdout,chunk,...rest);output+=chunk;return true;};
   try{await action();return output;}finally{process.stdout.write=write;}
 }
 async function stopSetupServer(server){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
@@ -843,7 +851,8 @@ test('a late completed login failure cannot replace a newer submitting reauthent
       store=await MarketplaceProfileStore.open(home);const newer=store.getSetupState('original');store.close();store=undefined;
       assert.equal(newer.state,'LOGIN_SUBMITTING');
       // When the superseded definitive failure is delivered while the newer login is still submitting.
-      releaseFirst();assert.equal((await first).code,'SIGNER_UNAVAILABLE');
+      // The old result has lost ownership and cannot roll back the newer login.
+      releaseFirst();assert.equal((await first).code,'SETUP_BUSY');
       assert.ok(firstBodyCompletedAt<=firstCallbackReleasedAt);
       store=await MarketplaceProfileStore.open(home);assert.deepEqual(store.getSetupState('original'),newer);store.close();store=undefined;
       releaseSecond();await second;
@@ -888,7 +897,7 @@ test('guided reauthentication keeps the desktop keyring environment and original
     for(const stream of [process.stdin,process.stderr])Object.defineProperty(stream,'isTTY',{configurable:true,value:true});
     const questions=[];
     // When reauthentication explicitly approves the exact typed login in the local terminal.
-    const output=await withoutSetupOutput(()=>runGuidedSetup(['--home',home,'--profile','original'],{
+    const output=await withoutSetupOutput(()=>runGuidedSetup(['--json','--home',home,'--profile','original'],{
       ...process.env,MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:stale},async question=>{
         questions.push(question);return question.includes('Type APPROVE to confirm:')?'APPROVE':'';
       }));

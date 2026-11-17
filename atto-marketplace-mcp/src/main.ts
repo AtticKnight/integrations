@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { terminalText } from './terminal-output.js';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,11 +16,13 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
     await runWalletHost(env);
     return;
   }
+  // A leading --json selects a terminal command; each command owns its output mode.
+  if (argv[0] === '--json' && ['setup','approve','wallet'].includes(argv[1] ?? '')) argv = [...argv.slice(1), '--json'];
   if (argv[0] === 'setup' && argv.slice(1).some(arg => arg === '--help' || arg === '-h')) {
     printHelp();
     return;
   }
-  if(argv[0]==='setup'&&(argv.includes('--interactive')||argv.slice(1).every(arg=>!arg.startsWith('--')||['--home','--profile','--origin','--audience','--advanced'].includes(arg)))) {
+  if(argv[0]==='setup'&&(argv.includes('--interactive')||argv.slice(1).every(arg=>!arg.startsWith('--')||['--home','--profile','--origin','--audience','--advanced','--json'].includes(arg)))) {
     const {runGuidedSetup}=await import('./guided-setup.js');
     await runGuidedSetup(argv.slice(1),env);return;
   }
@@ -68,7 +71,7 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
 }
 
 function printHelp(): void {
-  process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, per-user Marketplace home (override with --home).\nReuse the selected Atto CLI wallet and its current authority, choose Marketplace purposes, and optionally configure Nano. Use --advanced to choose accounts or configure native limits.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits bound the advertised quantity times unit price. Applications are free. Direct payment evidence uses payments:read and payments:write.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
+  process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nTerminal output is readable by default; add --json before or after the command for machine-readable results.\nDefaults: production Marketplace, main profile, per-user Marketplace home (override with --home).\nReuse the selected wallet and its current authority, or create a wallet with production defaults. Nano defaults to nano:mainnet and https://rpc.nano.to; existing wallets keep their saved settings. Choose ATTO, Nano or Both, then Login only, Limited spending or Unlimited spending. Limited asks only for missing caps; Unlimited can spend the available balance and future deposits. One final APPROVE reviews wallet changes and the actual login together; existing wallet settings and history are preserved. Nano uses managed wallet/recovery paths. Use --advanced for networks, endpoints, account indexes and custom policy, or explicit wallet setup --network options.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nExpired unsigned login: setup --complete requests a fresh exact approval for the same profile; uncertain submissions are never replayed.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits bound the advertised quantity times unit price. Applications are free. Direct payment evidence uses payments:read and payments:write.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
 }
 
 function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; home?: string; filesDirectory?: string; help: boolean } {
@@ -95,7 +98,7 @@ function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; 
 if (process.argv[1] && isMainModule(process.argv[1])) {
   run().catch(error => {
     const message = error instanceof Error ? error.message : 'Marketplace MCP could not start.';
-    process.stderr.write(`Marketplace MCP: ${message}\n`);
+    process.stderr.write(`Marketplace MCP: ${terminalText(message)}\n`);
     process.exitCode = 1;
   });
 }

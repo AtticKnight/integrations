@@ -1,9 +1,10 @@
+import { takeJsonFlag, writeTerminalResult, terminalText } from './terminal-output.js';
 import { defaultMarketplaceHome } from './defaults.js';
 import { marketplaceCommand, shellQuote } from './shell-quote.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { ProfileError, MarketplaceProfileStore, type NewProfile } from './profile-store.js';
-import { approvalRequestPath, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest,
+import { approvalRequestPath, approvalResponseIsAbsent, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest,
   type MarketplaceProofApprovalRequest } from './approval-files.js';
 import { apiUrl, MarketplaceApiError, signerApiError } from './marketplace-api.js';
 import { managedWalletEnvironment } from './wallet-home.js';
@@ -43,34 +44,39 @@ interface SetupOptions {
   purchaseXnoLimit?:string;
 }
 
-export async function runSetup(argv:string[],env:NodeJS.ProcessEnv):Promise<void> {
-  const options=parseSetupArgs(argv);
+export interface WalletConsentIntent {version:1;nanoControllerDirectory?:string;controller?:{directory:string;address:string;index:number;network:string};wallets:{asset:'ATTO'|'XNO';intent:Record<string,unknown>}[]}
+interface SetupOutput {json?:boolean;quiet?:boolean;allowLoginRefresh?:boolean;walletConsent?:WalletConsentIntent}
+type Output = (value: unknown) => void;
+export async function runSetup(argv:string[],env:NodeJS.ProcessEnv,output:SetupOutput={}):Promise<void> {
+  const selected=takeJsonFlag(argv);
+  const print:Output=value=>{if(!output.quiet)writeTerminalResult(value,output.json??selected.json);};
+  const options=parseSetupArgs(selected.argv);
   const home=resolve(options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env));
   env=managedWalletEnvironment(home,env);
   if (!options.profile) throw setupUsage('Choose a private profile ID with --profile.');
   const store=await MarketplaceProfileStore.open(home);
   try {
     if (options.fromProfile || options.credentialId) {
-      activateCredential(store,options);
+      activateCredential(store,options,print);
       return;
     }
     if (options.status) {
-      reportSetupStatus(store,options.profile,home);
+      reportSetupStatus(store,options.profile,home,print);
       return;
     }
     if (options.reauthenticate) {
-      await reauthenticate(store,options.profile,home,env);
+      await reauthenticate(store,options.profile,home,env,print);
       return;
     }
     if (options.complete) {
-      await completeSetup(store,options.profile,home,env);
+      await completeSetup(store,options.profile,home,env,print,output.allowLoginRefresh??true);
       return;
     }
-    await beginSetup(store,options,home,env);
+    await beginSetup(store,options,home,env,print,output.walletConsent);
   } finally { store.close(); }
 }
 
-async function reauthenticate(store:MarketplaceProfileStore,profileId:string,home:string,env:NodeJS.ProcessEnv):Promise<void> {
+async function reauthenticate(store:MarketplaceProfileStore,profileId:string,home:string,env:NodeJS.ProcessEnv,print:Output):Promise<void> {
   const profile=store.getProfile(profileId);
   if(profile.authMode!=='controller-session')throw new ProfileError('AUTH_MODE','Reauthentication requires the original controller-session profile. Scoped credentials must be replaced through their credential workflow.');
   const pending=store.getSetupState(profileId);
@@ -81,13 +87,15 @@ async function reauthenticate(store:MarketplaceProfileStore,profileId:string,hom
   const payload=JSON.stringify({profileId,origin:profile.origin,audience:profile.audience,controllerNetwork:profile.controllerNetwork,
     controllerAddress:profile.controllerAddress,controllerIndex:profile.controllerIndex,mode:'controller-session',reauthenticate:true,challenge});
   store.startReauthentication(profileId,payload,pending?.privatePayload??null);
-  await completeSetup(store,profileId,home,env);
+  await completeSetup(store,profileId,home,env,print);
 }
 
-async function beginSetup(store:MarketplaceProfileStore,options:SetupOptions,home:string,env:NodeJS.ProcessEnv):Promise<void> {
+async function beginSetup(store:MarketplaceProfileStore,options:SetupOptions,home:string,env:NodeJS.ProcessEnv,print:Output,walletConsent?:WalletConsentIntent):Promise<void> {
   const profileId=required(options.profile,'profile');
   if (store.listProfileIds().includes(profileId)) throw new ProfileError('PROFILE_EXISTS','This profile ID is already configured. Use --reauthenticate to renew its controller session while keeping its journals.');
-  if (store.getSetupState(profileId)) throw new ProfileError('SETUP_IN_PROGRESS',`This setup has a pending private approval. Continue with: ${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`);
+  const pending=store.getSetupState(profileId);
+  if(pending&&isUnknownSetupState(pending.state))throw unknownSetupOutcome(store,profileId,home);
+  if (pending) throw new ProfileError('SETUP_IN_PROGRESS',`This setup has a pending private approval. Continue with: ${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`);
   const origin=normalizeOrigin(required(options.origin,'origin'));
   const audience=required(options.audience,'audience');
   if (audience.length>255 || /[\r\n\0]/.test(audience) || audience.trim()!==audience) throw setupUsage('Use the exact configured Agent API audience as one nonempty line of at most 255 characters.');
@@ -111,26 +119,22 @@ async function beginSetup(store:MarketplaceProfileStore,options:SetupOptions,hom
   const loginChallenge=parseChallenge(challenge);
   validateLoginChallenge(loginChallenge,controllerNetwork,controllerAddress,audience);
   store.createSetupState(profileId,'LOGIN_READY',JSON.stringify({profileId,origin,audience,controllerNetwork,controllerAddress,controllerIndex,mode,
-    ...(credential?{credential}:{}),challenge:loginChallenge}));
-  await completeSetup(store,profileId,home,env);
+    ...(credential?{credential}:{}),...(walletConsent?{walletConsent}:{}),challenge:loginChallenge}));
+  await completeSetup(store,profileId,home,env,print);
 }
 
-async function completeSetup(store:MarketplaceProfileStore,profileId:string,home:string,env:NodeJS.ProcessEnv):Promise<void> {
+async function completeSetup(store:MarketplaceProfileStore,profileId:string,home:string,env:NodeJS.ProcessEnv,print:Output,allowLoginRefresh=true):Promise<void> {
   const existing=store.listProfileIds().includes(profileId)?store.getProfile(profileId):undefined;
   const pending=store.getSetupState(profileId);
   if (!pending) {
     if (!existing) throw new ProfileError('SETUP_REQUIRED',`No pending setup exists for this profile ID. Start with ${marketplaceCommand} setup --profile ${profileId} --home ${shellQuote(home)} and a fresh controller challenge.`);
     if(store.needsReauthentication(profileId))throw new ProfileError('REAUTH_REQUIRED','Run setup --profile '+profileId+' --reauthenticate with the same --home to renew this session and retain its payment journals.');
-    printJson({status:'ready',profileId:existing.id,origin:existing.origin,accountId:existing.accountId,authMode:existing.authMode});
+    print({status:'ready',profileId:existing.id,origin:existing.origin,accountId:existing.accountId,authMode:existing.authMode});
     return;
   }
-  if (pending.state==='LOGIN_UNKNOWN' || pending.state==='LOGIN_SUBMITTING' || pending.state==='SCOPED_KEY_UNKNOWN'
-    || pending.state==='SCOPED_KEY_SUBMITTING' || pending.state==='SCOPED_KEY_CHALLENGE_IN_FLIGHT') {
-    if(existing&&asRecord(JSON.parse(pending.privatePayload)).reauthenticate===true)throw new ProfileError('REAUTH_REQUIRED','The last login outcome is unknown. Use --reauthenticate with this same profile and --home for a fresh proof; its payment journals are preserved.');
-    throw new ProfileError('SETUP_UNKNOWN','The last setup request may have reached Marketplace. Do not replay it. Start a new setup under a new profile ID after checking the account’s session or credential list.');
-  }
+  if(isUnknownSetupState(pending.state))throw unknownSetupOutcome(store,profileId,home);
   const saved=asRecord(JSON.parse(pending.privatePayload));
-  const expectedPayload=saved.reauthenticate===true?pending.privatePayload:undefined;
+  const expectedPayload=pending.privatePayload;
   if (pending.state==='LOGIN_READY') {
     const challenge=parseChallenge(saved.challenge);
     const controllerNetwork=saved.controllerNetwork==='NANO'?'NANO':'ATTO';
@@ -145,10 +149,19 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
       throw new ProfileError('SETUP_BUSY','Another local setup process is preparing this exact login challenge. Retry after it finishes.');
     }
     const path=await writeApprovalRequest(home,profileId,handle,request);
-    printApprovalInstructions(profileId,handle,path,home,'Approve the exact login in the local Marketplace wallet terminal, then complete this same setup.');
+    if(saved.walletConsent)print({status:'wallet_consent_required',profileId,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`,next:'Review wallet permissions and the exact login together in guided setup.'});
+    else printApprovalInstructions(profileId,handle,path,home,'Approve the exact login in the local Marketplace wallet terminal, then complete this same setup.',print);
     return;
   }
   if (pending.state==='LOGIN_APPROVAL') {
+    const expired=expiredUnsignedLoginApproval(store,profileId,home);
+    if(expired){
+      if(!allowLoginRefresh)throw expiredLoginRetry(home,profileId);
+      await refreshExpiredLoginApproval(store,profileId,home,expired);
+      await completeSetup(store,profileId,home,env,print,false);
+      return;
+    }
+    if(saved.walletConsent)throw walletConsentRequired(home,profileId);
     const request=parseApprovalRequest(saved.request);
     const challenge=parseChallenge({...request.challenge,accountId:request.accountId,controllerId:request.identityId});
     validateLoginChallenge(challenge,request.controller.network,request.controller.address,request.audience);
@@ -162,19 +175,19 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
       session=asRecord(await requestJson(String(saved.origin),'/v1/agent/auth/sessions',proofBody(response)));
     } catch (error) {
       if (error instanceof MarketplaceApiError && (error.code==='SIGNER_REQUEST_REJECTED' || error.code==='SIGNER_UNAVAILABLE')) {
-        store.transitionSetupState(profileId,'LOGIN_SUBMITTING','LOGIN_APPROVAL',pending.privatePayload,expectedPayload);
+        if(!store.transitionSetupState(profileId,'LOGIN_SUBMITTING','LOGIN_APPROVAL',pending.privatePayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This result no longer owns the saved setup. Continue its current approval.');
         throw new ProfileError(error.code,`${error.message} Resume this same setup with --complete while its challenge is valid.`);
       }
-      store.transitionSetupState(profileId,'LOGIN_SUBMITTING','LOGIN_UNKNOWN',pending.privatePayload,expectedPayload);
-      throw new ProfileError('SETUP_UNKNOWN',saved.reauthenticate===true?'Marketplace may have created a new session. Use --reauthenticate again with this same profile for a fresh proof; its journals are preserved.':'Marketplace may have created a controller session but its tokens were not received. Do not replay this challenge; start a new profile setup.');
+      if(!store.transitionSetupState(profileId,'LOGIN_SUBMITTING','LOGIN_UNKNOWN',pending.privatePayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This result no longer owns the saved setup. Continue its current approval.');
+      throw new ProfileError('SETUP_UNKNOWN',unknownSetupOutcome(store,profileId,home).message);
     }
     const parsedSession=parseSession(session);
     if (parsedSession.accountId!==challenge.accountId || parsedSession.identityId!==challenge.controllerId) throw setupFailure();
     if (saved.mode==='controller-session') {
     const profile=profileFromSetup(saved,parsedSession);
       if(saved.reauthenticate===true)store.completeReauthentication(profile,pending.privatePayload);
-      else{store.createProfile(profile);store.deleteSetupState(profileId);}
-      printJson({status:'ready',profileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
+      else store.createProfile(profile,{state:'LOGIN_SUBMITTING',privatePayload:expectedPayload});
+      print({status:'ready',profileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
         controllerNetwork:profile.controllerNetwork,controllerAddress:profile.controllerAddress,controllerIndex:profile.controllerIndex});
       return;
     }
@@ -182,14 +195,14 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
     const credential=asRecord(saved.credential);
     const command={operation:'CREATE',idempotencyKey:randomUUID(),credential};
     const setupWithSession={...saved,session:parsedSession,credentialCommand:command};
-    if (!store.transitionSetupState(profileId,'LOGIN_SUBMITTING','SCOPED_KEY_PREPARING',JSON.stringify(setupWithSession))) {
+    if (!store.transitionSetupState(profileId,'LOGIN_SUBMITTING','SCOPED_KEY_PREPARING',JSON.stringify(setupWithSession),expectedPayload)) {
       throw new ProfileError('SETUP_BUSY','The completed login no longer owns this scoped-profile setup. Inspect local setup state.');
     }
-    await continueScopedSetup(store,profileId,home,'SCOPED_KEY_PREPARING',setupWithSession);
+    await continueScopedSetup(store,profileId,home,'SCOPED_KEY_PREPARING',setupWithSession,JSON.stringify(setupWithSession),print);
     return;
   }
   if (pending.state==='SCOPED_KEY_PREPARING') {
-    await continueScopedSetup(store,profileId,home,pending.state,saved);
+    await continueScopedSetup(store,profileId,home,pending.state,saved,expectedPayload,print);
     return;
   }
   if (pending.state==='SCOPED_KEY_APPROVAL') {
@@ -206,23 +219,22 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
         credential:asRecord(saved.credentialCommand).credential,proof:proofBody(response),
       },String(asRecord(saved.session).accessToken)));
     } catch {
-      store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload);
-      throw new ProfileError('SETUP_UNKNOWN','Marketplace may have created the one-time scoped key but did not return its secret. Do not replay; start a new setup under another profile ID and inspect credential metadata for cleanup.');
+      if(!store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This result no longer owns the saved setup. Continue its current approval.');
+      throw unknownSetupOutcome(store,profileId,home);
     }
     if (typeof result.apiKey!=='string' || typeof result.apiKeyId!=='string') {
-      store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload);
-      throw new ProfileError('SETUP_UNKNOWN','Marketplace did not return the one-time scoped credential secret. It will not be reconstructed or exposed. Start a new setup under another profile ID.');
+      if(!store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This result no longer owns the saved setup. Continue its current approval.');
+      throw unknownSetupOutcome(store,profileId,home);
     }
     if (result.apiKey.length<16 || result.apiKey.length>8192 || /[\r\n\0]/.test(result.apiKey)) {
-      store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload);
-      throw new ProfileError('SETUP_UNKNOWN','Marketplace returned an invalid one-time scoped credential secret. It will not be printed or replayed. Start a new setup under another profile ID.');
+      if(!store.transitionSetupState(profileId,'SCOPED_KEY_SUBMITTING','SCOPED_KEY_UNKNOWN',pending.privatePayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This result no longer owns the saved setup. Continue its current approval.');
+      throw unknownSetupOutcome(store,profileId,home);
     }
     const session=asRecord(saved.session);
     const spec=asRecord(asRecord(saved.credentialCommand).credential);
     const profile=profileFromSetup({...saved,credential:spec},session,result.apiKey);
-    store.createProfile(profile);
-    store.deleteSetupState(profileId);
-    printJson({status:'ready',profileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
+    store.createProfile(profile,{state:'SCOPED_KEY_SUBMITTING',privatePayload:expectedPayload});
+    print({status:'ready',profileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
       apiKeyId:result.apiKeyId,scopes:profile.apiScopes,publishAttoLimit:profile.publishAttoLimit,
       publishXnoLimit:profile.publishXnoLimit,
       productPublishAttoLimit:profile.productPublishAttoLimit,productPublishXnoLimit:profile.productPublishXnoLimit,
@@ -232,16 +244,16 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
   throw new ProfileError('SETUP_STATE','This setup state cannot be resumed automatically. Inspect it in the local terminal and use a fresh profile ID if the result is uncertain.');
 }
 
-async function continueScopedSetup(store:MarketplaceProfileStore,profileId:string,home:string,state:string,saved:Record<string,unknown>):Promise<void> {
+async function continueScopedSetup(store:MarketplaceProfileStore,profileId:string,home:string,state:string,saved:Record<string,unknown>,expectedPayload:string,print:Output):Promise<void> {
   if (state!=='SCOPED_KEY_PREPARING') throw new ProfileError('SETUP_STATE','The scoped-key setup is not ready for a new approval challenge.');
   const credentialCommand=asRecord(saved.credentialCommand);
-  if (!store.transitionSetupState(profileId,'SCOPED_KEY_PREPARING','SCOPED_KEY_CHALLENGE_IN_FLIGHT',JSON.stringify(saved))) {
+  if (!store.transitionSetupState(profileId,'SCOPED_KEY_PREPARING','SCOPED_KEY_CHALLENGE_IN_FLIGHT',expectedPayload,expectedPayload)) {
     throw new ProfileError('SETUP_BUSY','Another local setup process is requesting this scoped-key challenge. Retry after it completes.');
   }
   let challenge:unknown;
   try { challenge=await requestJson(String(saved.origin),'/v1/agent/credentials/challenges',credentialCommand,String(asRecord(saved.session).accessToken)); }
   catch (error) {
-    store.transitionSetupState(profileId,'SCOPED_KEY_CHALLENGE_IN_FLIGHT','SCOPED_KEY_PREPARING',JSON.stringify(saved));
+    if(!store.transitionSetupState(profileId,'SCOPED_KEY_CHALLENGE_IN_FLIGHT','SCOPED_KEY_PREPARING',expectedPayload,expectedPayload))throw new ProfileError('SETUP_BUSY','This challenge result no longer owns the saved setup. Continue its current approval.');
     throw error;
   }
   const parsedChallenge=parseChallenge(challenge);
@@ -252,14 +264,14 @@ async function continueScopedSetup(store:MarketplaceProfileStore,profileId:strin
     controllerNetwork:saved.controllerNetwork==='NANO'?'NANO':'ATTO',controllerAddress:String(saved.controllerAddress),controllerIndex,purpose:'API-key creation',
     action:{kind:'credential',operation:'CREATE',command:credentialCommand},challenge:parsedChallenge});
   const pending={...saved,request};
-  if (!store.transitionSetupState(profileId,'SCOPED_KEY_CHALLENGE_IN_FLIGHT','SCOPED_KEY_APPROVAL',JSON.stringify(pending))) {
+  if (!store.transitionSetupState(profileId,'SCOPED_KEY_CHALLENGE_IN_FLIGHT','SCOPED_KEY_APPROVAL',JSON.stringify(pending),expectedPayload)) {
     throw new ProfileError('SETUP_BUSY','The challenge response no longer owns this setup. Inspect local setup state.');
   }
   const path=await writeApprovalRequest(home,profileId,handle,request);
-  printApprovalInstructions(profileId,handle,path,home,'Sign the exact scoped credential grant in the local wallet terminal. Marketplace MCP stores the returned API key directly in this private profile; no secret is printed.');
+  printApprovalInstructions(profileId,handle,path,home,'Sign the exact scoped credential grant in the local wallet terminal. Marketplace MCP stores the returned API key directly in this private profile; no secret is printed.',print);
 }
 
-function activateCredential(store:MarketplaceProfileStore,options:SetupOptions):void {
+function activateCredential(store:MarketplaceProfileStore,options:SetupOptions,print:Output):void {
   const newProfileId=required(options.profile,'new profile');
   const sourceProfileId=required(options.fromProfile,'source profile');
   const credentialId=required(options.credentialId,'credential ID');
@@ -276,23 +288,23 @@ function activateCredential(store:MarketplaceProfileStore,options:SetupOptions):
     purchaseAttoLimit:saved.purchaseAttoLimit,purchaseXnoLimit:saved.purchaseXnoLimit});
   store.deleteIssuedCredential(sourceProfileId,credentialId);
   const profile=store.getProfile(newProfileId);
-  printJson({status:'ready',profileId:newProfileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
+  print({status:'ready',profileId:newProfileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
     scopes:profile.apiScopes,publishAttoLimit:profile.publishAttoLimit,publishXnoLimit:profile.publishXnoLimit,
     productPublishAttoLimit:profile.productPublishAttoLimit,productPublishXnoLimit:profile.productPublishXnoLimit,
     purchaseAttoLimit:profile.purchaseAttoLimit,purchaseXnoLimit:profile.purchaseXnoLimit});
 }
 
-function reportSetupStatus(store:MarketplaceProfileStore,profileId:string,home:string):void {
+function reportSetupStatus(store:MarketplaceProfileStore,profileId:string,home:string,print:Output):void {
   const state=store.getSetupState(profileId);
   if (!state) {
     const profile=store.getProfile(profileId);
-    printJson({status:'ready',profileId:profile.id,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode});
+    print({status:'ready',profileId:profile.id,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode});
     return;
   }
   const saved=asRecord(JSON.parse(state.privatePayload));
   const request=saved.request?parseApprovalRequest(saved.request):undefined;
-  printJson({status:state.state,profileId,...(request?{handoffId:request.handoffId,expiresAt:request.challenge.expiresAt,
-    walletCommand:`${marketplaceCommand} approve ${shellQuote(approvalRequestPath(home,profileId,request.handoffId))} --home ${shellQuote(home)}`}:{}) ,
+  print({status:state.state,profileId,...(saved.walletConsent?{walletConsentPending:true,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`}:{}) ,...(request?{handoffId:request.handoffId,expiresAt:request.challenge.expiresAt,
+    ...(!saved.walletConsent?{walletCommand:`${marketplaceCommand} approve ${shellQuote(approvalRequestPath(home,profileId,request.handoffId))} --home ${shellQuote(home)}`}:{})}:{}) ,
     ...(state.state==='LOGIN_READY'?{resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`}:{}),
     ...(typeof saved.controllerNetwork==='string'?{controllerNetwork:saved.controllerNetwork}:{})});
 }
@@ -498,10 +510,88 @@ function timestampMillis(value:unknown):number {if(typeof value==='number'&&Numb
 function isUuid(value:unknown):value is string {return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);}
 function asRecord(value:unknown):Record<string,unknown>{if(value===null||typeof value!=='object'||Array.isArray(value))throw setupFailure();return value as Record<string,unknown>;}
 function required(value:string|undefined,label:string):string{if(!value)throw setupUsage(`Provide --${label.replaceAll(' ','-')}.`);return value;}
-function printApprovalInstructions(profileId:string,handle:string,path:string,home:string,next:string):void {
-  printJson({status:'approval_required',profileId,handoffId:handle,walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
+function printApprovalInstructions(profileId:string,handle:string,path:string,home:string,next:string,print:Output):void {
+  print({status:'approval_required',profileId,handoffId:handle,walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
     resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next});
 }
-function printJson(value:unknown):void {process.stdout.write(`${JSON.stringify(value)}\n`);}
 function setupUsage(message:string):ProfileError{return new ProfileError('SETUP_USAGE',message);}
 function setupFailure():ProfileError{return new ProfileError('SETUP_PROTOCOL','Marketplace setup returned an invalid response. Check the pinned origin and repeat only after confirming the previous action had no effect.');}
+
+
+export function isUnknownSetupState(state:string):boolean {
+  return ['LOGIN_UNKNOWN','LOGIN_SUBMITTING','SCOPED_KEY_UNKNOWN','SCOPED_KEY_SUBMITTING','SCOPED_KEY_CHALLENGE_IN_FLIGHT'].includes(state);
+}
+
+/** A read-only recovery instruction: never resubmit or create the suggested profile here. */
+export function unknownSetupOutcome(store:MarketplaceProfileStore,profileId:string,home:string,reason:'unknown'|'expired-response'='unknown'):ProfileError {
+  const pending=store.getSetupState(profileId);
+  if(!pending)throw new ProfileError('SETUP_STATE','The uncertain setup state is unavailable.');
+  const saved=asRecord(JSON.parse(pending.privatePayload));
+  if(store.listProfileIds().includes(profileId)&&saved.reauthenticate===true){
+    return new ProfileError('REAUTH_REQUIRED',`${reason==='unknown'?'The last login outcome is unknown.':'The expired login already has a saved response.'} Check your account sessions first. Its previous request will not be replayed. Keep this profile and its payment journals; request a fresh proof with: ${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)} --reauthenticate`);
+  }
+  let suffix=1,newProfile=`${profileId.slice(0,40)}-retry`;
+  while(store.listProfileIds().includes(newProfile)||store.getSetupState(newProfile))newProfile=`${profileId.slice(0,36)}-retry-${++suffix}`;
+  const args=['--home',home,'--profile',newProfile,'--origin',String(saved.origin),'--audience',String(saved.audience),
+    '--controller-network',String(saved.controllerNetwork),'--controller-address',String(saved.controllerAddress),
+    '--controller-index',String(saved.controllerIndex),'--mode',String(saved.mode)];
+  if(saved.mode==='scoped-api-key'){
+    const credential=asRecord(saved.credential);
+    args.push('--credential-name',String(credential.name),'--expires-in-days',String(credential.expiresInDays));
+    for(const scope of credential.scopes as string[])args.push('--scope',scope);
+    for(const key of ['publishAttoLimit','publishXnoLimit','productPublishAttoLimit','productPublishXnoLimit','purchaseAttoLimit','purchaseXnoLimit']){
+      if(credential[key]!==undefined)args.push('--'+key.replace(/[A-Z]/g,letter=>'-'+letter.toLowerCase()),String(credential[key]));
+    }
+  }
+  return new ProfileError(reason==='unknown'?'SETUP_UNKNOWN':'APPROVAL_EXPIRED',`${reason==='unknown'?'The previous request may have completed.':'The expired login already has a saved response and cannot be refreshed as unsigned.'} Check your account sessions${saved.mode==='scoped-api-key'?' and credentials':''} first. It will not be replayed; the original setup, wallets and journals are preserved. After checking, start a fresh setup with this unused profile: ${marketplaceCommand} setup ${args.map(value=>shellQuote(value)).join(' ')}`);
+}
+
+
+interface ExpiredLoginApproval { privatePayload:string; saved:Record<string,unknown>; request:MarketplaceProofApprovalRequest }
+
+/** Classify only a fully validated, expired, unsigned current login; no key or network access. */
+export function expiredUnsignedLoginApproval(store:MarketplaceProfileStore,profileId:string,home:string):ExpiredLoginApproval|undefined {
+  const pending=store.getSetupState(profileId);
+  if(pending?.state!=='LOGIN_APPROVAL')return undefined;
+  const saved=asRecord(JSON.parse(pending.privatePayload));
+  const request=validateTypedApproval(saved.request,{allowExpired:true});
+  const challenge=asRecord(saved.challenge);
+  if(request.purpose!=='login'||request.action.kind!=='login'||request.profileId!==profileId||saved.profileId!==profileId
+    ||!['controller-session','scoped-api-key'].includes(String(saved.mode))
+    ||request.marketplaceOrigin!==saved.origin||request.audience!==saved.audience
+    ||request.controller.network!==saved.controllerNetwork||request.controller.address!==saved.controllerAddress||request.controller.index!==saved.controllerIndex
+    ||request.accountId!==challenge.accountId||request.identityId!==challenge.controllerId
+    ||['challengeId','message','issuedAt','expiresAt'].some(key=>request.challenge[key as keyof typeof request.challenge]!==challenge[key]))
+    throw new ProfileError('APPROVAL_BINDING','The saved login request differs from this profile’s exact setup intent.');
+  if(Date.parse(request.challenge.expiresAt)>Date.now())return undefined;
+  if(!approvalResponseIsAbsent(home,profileId,request.handoffId))throw unknownSetupOutcome(store,profileId,home,'expired-response');
+  return {privatePayload:pending.privatePayload,saved,request};
+}
+
+async function refreshExpiredLoginApproval(store:MarketplaceProfileStore,profileId:string,home:string,expired:ExpiredLoginApproval):Promise<void> {
+  const {request,saved}=expired;
+  let challenge:ReturnType<typeof parseChallenge>;
+  try{
+    challenge=parseChallenge(await requestJson(String(saved.origin),'/v1/agent/auth/challenges',{
+      network:request.controller.network,address:request.controller.address}));
+    validateLoginChallenge(challenge,request.controller.network,request.controller.address,request.audience);
+    if(challenge.accountId!==request.accountId||challenge.controllerId!==request.identityId
+      ||challenge.message.split('\n')[2]!==request.challenge.message.split('\n')[2])throw new ProfileError('PROFILE_CONFLICT','The fresh challenge belongs to a different account, controller or native network. The expired setup was preserved.');
+  }catch(error){
+    process.stderr.write(`The expired login setup was preserved. Continue with: ${terminalText(loginResumeCommand(home,profileId))}\n`);
+    throw error;
+  }
+  if(!approvalResponseIsAbsent(home,profileId,request.handoffId))throw new ProfileError('SETUP_BUSY','A response for the old login appeared during refresh. It was preserved; inspect the current setup before continuing.');
+  const replacement:Record<string,unknown>={...saved,challenge};delete replacement.request;
+  if(!store.transitionSetupState(profileId,'LOGIN_APPROVAL','LOGIN_READY',JSON.stringify(replacement),expired.privatePayload))
+    throw new ProfileError('SETUP_BUSY','Another login generation replaced the expired setup. Its current approval was preserved.');
+}
+function loginResumeCommand(home:string,profileId:string):string{return `${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)} --complete`;}
+export function expiredLoginRetry(home:string,profileId:string):ProfileError {
+  return new ProfileError('APPROVAL_EXPIRED',`This exact login approval expired. No proof was submitted. Request a fresh approval with: ${loginResumeCommand(home,profileId)}`);
+}
+
+
+export function walletConsentRequired(home:string,profileId:string):ProfileError {
+  return new ProfileError('WALLET_CONSENT_REQUIRED',`The selected wallet permissions still require their combined terminal review. Continue with: ${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`);
+}

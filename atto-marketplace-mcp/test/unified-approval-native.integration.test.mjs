@@ -105,6 +105,20 @@ async function terminalApprove(fixture, requestPath, accepted = true) {
   const transcript = Buffer.from(envelope.transcriptBase64, 'base64').toString('utf8');
   if (fixture.assertPrivateOutput) fixture.assertPrivateOutput(transcript);
   else assert.equal(transcript.includes(phrase), false, 'Recovery phrase leaked into terminal output.');
+  if (accepted && transcript.includes('Review this exact Marketplace controller action:')) {
+    // Given the exact typed request and a successful production terminal review.
+    const request=JSON.parse(await readFile(requestPath,'utf8'));
+    // When the default human approval preview is shown.
+    // Then the trusted destination, wallet identity and expiry remain visible without raw request JSON.
+    assert.ok(transcript.includes(`Marketplace: ${request.marketplaceOrigin}`));
+    assert.ok(transcript.includes(`Audience: ${request.audience}`));
+    assert.ok(transcript.includes(`Controller address: ${request.controller.address}`));
+    assert.ok(transcript.includes(`Controller index: ${request.controller.index}`));
+    assert.ok(transcript.includes(`Controller network: ${request.controller.network}`));
+    assert.ok(transcript.includes(`Purpose: ${request.purpose}`));
+    assert.ok(transcript.includes(`Expires At: ${request.challenge.expiresAt}`) || transcript.includes(`Expires at: ${request.challenge.expiresAt}`));
+    assert.doesNotMatch(transcript,/"marketplaceOrigin"|"challengeId"|"requestDigest"/);
+  }
   if (accepted) assert.match(transcript, /"approved":true/);
   else assert.equal(transcript.includes('"approved":true'), false);
   return transcript;
@@ -144,13 +158,13 @@ async function fixture(t, network, origin, actualBackend = false) {
   const address = network === 'ATTO' ? atto : nanoConfig.address;
   let profile;
   if (actualBackend) {
-    const setup = ['setup', '--home', home, '--profile', 'acceptance', '--origin', origin, '--audience', audience,
+    const setup = ['setup', '--json', '--home', home, '--profile', 'acceptance', '--origin', origin, '--audience', audience,
       '--controller-network', network, '--controller-address', address, '--controller-index', network === 'ATTO' ? '0' : '1', '--mode', 'controller-session'];
     let result = JSON.parse((await run(process.execPath, [main, ...setup], env)).trim());
     if (result.status === 'approval_required') {
       const path = join(home, 'approvals', 'acceptance', `${result.handoffId}.request.json`);
       await terminalApprove({home, env, assertPrivateOutput}, path);
-      result = JSON.parse((await run(process.execPath, [main, 'setup', '--home', home, '--profile', 'acceptance', '--complete'], env)).trim());
+      result = JSON.parse((await run(process.execPath, [main, 'setup', '--home', home, '--profile', 'acceptance', '--complete', '--json'], env)).trim());
     }
     assert.equal(result.status, 'ready');
     const store = await MarketplaceProfileStore.open(home);
@@ -205,6 +219,19 @@ async function approveAndRetry(f, name, args) {
     await writeFile(requestPath, `${JSON.stringify(request)}\n`, {mode: 0o600});
   }
   const transcript = await terminalApprove(f, requestPath);
+  if(request.action.kind==='credential' && request.action.command.credential){
+    // Given a real credential grant prepared through stdio and the native typed approval boundary.
+    const grant=request.action.command.credential;
+    // When the default terminal review is accepted.
+    // Then its complete scopes and exact monetary ceilings are visible beside their meanings.
+    assert.ok(transcript.includes(`Name: ${grant.name}`));
+    assert.ok(transcript.includes(`Expires In Days: ${grant.expiresInDays}`));
+    assert.match(transcript,/Scopes:/);
+    for(const scope of grant.scopes)assert.ok(transcript.includes(`- ${scope}`),`Missing reviewed scope ${scope}`);
+    for(const [field,label] of [['purchaseAttoLimit','Purchase Atto Limit'],['productPublishAttoLimit','Product Publish Atto Limit'],['productPublishXnoLimit','Product Publish Xno Limit']]){
+      if(grant[field]!==undefined)assert.ok(transcript.includes(`${label}: ${grant[field]}`),`Missing reviewed exact ceiling ${field}`);
+    }
+  }
   const response = JSON.parse(await readFile(requestPath.replace('.request.json', '.response.json'), 'utf8'));
   assert.equal(transcript.includes(response.signature), false, 'Protected proof leaked into terminal output.');
   assert.equal(f.network === 'ATTO' ? await validAttoProof(f.address, response.message, response.signature)

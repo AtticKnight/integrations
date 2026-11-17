@@ -23,8 +23,8 @@ interface NanoWalletSettings {
         controllerPurposes: ControllerPurpose[];
     };
     limits: {
-        maxPaymentAtomic: string;
-        rolling24hAtomic: string;
+        maxPaymentAtomic: string | null;
+        rolling24hAtomic: string | null;
     };
 }
 export type NanoKeySource =
@@ -153,7 +153,9 @@ export function validateConfiguration(value: unknown): NanoWalletConfiguration {
         raw.grants.controllerPurposes.some((p: unknown) => !(CONTROLLER_PURPOSES as readonly unknown[]).includes(p)))
         fail('WALLET_CONFIGURATION');
     exactKeys(raw.limits, ['maxPaymentAtomic', 'rolling24hAtomic']);
-    if (positiveRaw(raw.limits.maxPaymentAtomic, true) > positiveRaw(raw.limits.rolling24hAtomic, true))
+    const { maxPaymentAtomic, rolling24hAtomic } = raw.limits;
+    if ((maxPaymentAtomic === null) !== (rolling24hAtomic === null)) fail('WALLET_CONFIGURATION');
+    if (maxPaymentAtomic !== null && positiveRaw(maxPaymentAtomic, true) > positiveRaw(rolling24hAtomic, true))
         fail('WALLET_CONFIGURATION');
     return raw as NanoWalletConfiguration;
 }
@@ -273,10 +275,12 @@ export async function approveNanoWalletPolicy(options: {
     grants: NanoWalletConfiguration['grants'];
     limits: NanoWalletConfiguration['limits'];
     terminalConfirmed: true;
+    expectedConfiguration?: NanoWalletConfiguration;
 }): Promise<{address:string;configurationPath:string}> {
     if (options.terminalConfirmed !== true)
         fail('TERMINAL_REQUIRED');
     const old = loadConfiguration(options.dataDir), config = validateConfiguration({ ...old, grants: options.grants, limits: options.limits });
+    if (options.expectedConfiguration !== undefined && canonical(old) !== canonical(options.expectedConfiguration)) fail('WALLET_CONFIGURATION_CHANGED');
     return withPrivateKey(config, async () => {
         const configurationPath = join(options.dataDir, 'wallet.json');
         const content = Buffer.from(`${canonical(config)}\n`);

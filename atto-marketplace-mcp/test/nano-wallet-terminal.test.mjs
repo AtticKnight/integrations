@@ -171,7 +171,7 @@ test('raw Nano import previews its address before consent and persists external 
     '--origin','http://localhost:8080','--audience','terminal-path-test','--index','3','--seed-file',seedFile];
   const cancelled=await terminal(args,environment,'NO');
   assert.notEqual(cancelled.exitCode,0);assert.equal(cancelled.promptAnswered,true);
-  const addressOffset=cancelled.transcript.indexOf(`Imported public address: ${expected.address}`);
+  const addressOffset=cancelled.transcript.indexOf(`Imported Public Address: ${expected.address}`);
   assert.ok(addressOffset>=0);assert.ok(addressOffset<cancelled.transcript.indexOf('Type APPROVE to confirm: '));
   assert.equal(cancelled.transcript.includes(seed.trim()),false);
   for(const path of [home,wallet,handoffs])await assert.rejects(readdir(path),{code:'ENOENT'});
@@ -243,4 +243,125 @@ test('Nano policy approval rejects a configuration changed during terminal conse
   assert.match(result.transcript,/WALLET_CONFIGURATION_CHANGED/);
   const after=JSON.parse(await readFile(path,'utf8'));
   assert.deepEqual(after,{...before,origin:'http://localhost:9999'});
+});
+
+test('explicit Nano Unlimited setup reviews future deposits and retains paired nulls on repeated setup', {skip:process.platform==='win32'}, async t=>{
+  // Given a synthetic private seed and no selected Nano profile.
+  const home=await mkdtemp(join(tmpdir(),'marketplace-nano-unlimited-terminal-'));t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+  const seedFile=join(home,'seed.hex');await writeFile(seedFile,'56'.repeat(32)+'\n',{mode:0o600});
+  const base=['setup','--asset','XNO','--network','nano:dev','--origin','http://localhost:8080','--audience','unlimited-terminal'];
+  const environment={MARKETPLACE_MCP_HOME:home};
+  // When the exact Unlimited transfer policy is approved through the real terminal.
+  const created=await terminal([...base,'--seed-file',seedFile,'--allow-external-transfers','--unlimited'],environment);
+  // Then the risk is explicit before consent and the persisted caps are actual paired nulls.
+  assert.equal(created.exitCode,0);assert.match(created.transcript,/Unlimited: can spend the available wallet balance, including future deposits/);
+  assert.ok(created.transcript.indexOf('future deposits')<created.transcript.indexOf('Type APPROVE to confirm:'));
+  const path=join(home,'wallets','nano','wallet.json'),before=await readFile(path);
+  const config=JSON.parse(before);assert.equal(config.grants.externalTransfers,true);assert.deepEqual(config.limits,{maxPaymentAtomic:null,rolling24hAtomic:null});
+  const journal=join(home,'wallets','nano','nano-wallet.sqlite3');await writeFile(journal,'original retained journal',{mode:0o600});
+  // When setup is repeated with cap and permission options omitted.
+  const repeated=await terminal(base,environment);
+  // Then explicit null caps, prior transfer authority, identity and journal remain exact.
+  assert.equal(repeated.exitCode,0);assert.deepEqual(await readFile(path),before);assert.equal(await readFile(journal,'utf8'),'original retained journal');
+});
+
+test('Nano explicit policy Unlimited declines safely and rejects mixed cap flags', {skip:process.platform==='win32'}, async t=>{
+  // Given an existing synthetic wallet with zero caps and denied transfers.
+  const home=await mkdtemp(join(tmpdir(),'marketplace-nano-unlimited-policy-'));t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+  const seedFile=join(home,'seed.hex');await writeFile(seedFile,'57'.repeat(32)+'\n',{mode:0o600});
+  const directory=join(home,'wallets','nano');
+  await provisionNanoWallet({dataDir:directory,seedFile,derivationIndex:1,network:'nano:dev',rpcUrl:'http://localhost:17076',origin:'http://localhost:8080',audience:'unlimited-policy',terminalConfirmed:true});
+  const path=join(directory,'wallet.json'),before=await readFile(path),environment={MARKETPLACE_MCP_HOME:home};
+  const policy=['policy','--asset','XNO','--allow-external-transfers','--unlimited'];
+  // When Unlimited consent is declined or combined with a finite cap flag.
+  const declined=await terminal(policy,environment,'NO');
+  const mixed=await terminal([...policy,'--max-payment-atomic','1'],environment);
+  // Then the original policy remains untouched and malformed terms never reach consent.
+  assert.notEqual(declined.exitCode,0);assert.match(declined.transcript,/Unlimited: can spend the available wallet balance, including future deposits/);
+  assert.notEqual(mixed.exitCode,0);assert.equal(mixed.promptAnswered,false);assert.deepEqual(await readFile(path),before);
+  // When the same paired-null policy receives exact typed approval.
+  const approved=await terminal(policy,environment);
+  // Then Unlimited is explicitly enabled through the existing policy owner.
+  assert.equal(approved.exitCode,0);const after=JSON.parse(await readFile(path,'utf8'));
+  assert.equal(after.grants.externalTransfers,true);assert.deepEqual(after.limits,{maxPaymentAtomic:null,rolling24hAtomic:null});
+});
+
+for (const method of ['create','import']) test(`Nano ${method} recovery survives cancellation before the plan and explicit restart continuation`,{skip:process.platform==='win32'},async t=>{
+  // Given an existing selected Nano wallet and its original journal, with a disposable OS-store stand-in.
+  const home=await mkdtemp(join(tmpdir(),`marketplace-nano-prepared-${method}-`));t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+  const directory=join(home,'wallets','nano'),seedFile=join(home,'original.hex');await writeFile(seedFile,'58'.repeat(32)+'\n',{mode:0o600});
+  await provisionNanoWallet({dataDir:directory,seedFile,derivationIndex:7,network:'nano:dev',rpcUrl:'http://localhost:17076',origin:'http://localhost:8080',audience:'prepared-nano',terminalConfirmed:true});
+  const originalConfig=await readFile(join(directory,'wallet.json')),journal=join(directory,'nano-wallet.sqlite3');
+  await writeFile(journal,'original retained native journal',{mode:0o600});
+  const phrase=`${'abandon '.repeat(23)}art`,secondPhrase=`${'zoo '.repeat(23)}vote`;
+  const source=`
+    import assert from 'node:assert/strict';
+    import {appendFileSync,existsSync,readFileSync,writeFileSync} from 'node:fs';
+    import {join} from 'node:path';
+    import {AttoApplication} from ${JSON.stringify(new URL('../../atto-cli/dist/application/app.js',import.meta.url).href)};
+    import {OsSecretStore} from ${JSON.stringify(new URL('../../atto-cli/dist/storage/secrets.js',import.meta.url).href)};
+    import {prepareNanoWalletInteractive,setupNanoWalletInteractive} from ${JSON.stringify(moduleUrl('nano-setup.js'))};
+    import {terminalPrompt} from ${JSON.stringify(moduleUrl('terminal-input.js'))};
+    const [home,phase,method]=process.argv.slice(1),phrase=phase==='new'?${JSON.stringify(secondPhrase)}:${JSON.stringify(phrase)};
+    OsSecretStore.prototype.get=async function(){const path=join(home,'fixture-secret-'+this.account);return existsSync(path)?readFileSync(path,'utf8'):null;};
+    OsSecretStore.prototype.set=async function(value){writeFileSync(join(home,'fixture-secret-'+this.account),value,{mode:0o600});appendFileSync(join(home,'fixture-store-operations'),'store\\n',{mode:0o600});};
+    const create=AttoApplication.prototype.createWallet;
+    AttoApplication.prototype.createWallet=function(mnemonic){return create.call(this,mnemonic??phrase);};
+    const options={home,env:{MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:join(home,'wallets','nano')},origin:'http://localhost:8080',audience:'prepared-nano',
+      prompt:async question=>{
+        if(question.startsWith('Nano wallet:')){
+          process.stderr.write(question+'\\n');
+          if(phase==='resume'||phase==='continue-wallet'){
+            const label=phase==='resume'?'Continue prepared recovery':'Continue existing managed wallet';
+            const match=new RegExp('\\\\[(\\\\d+)\\\\] '+label+' at ').exec(question);assert.ok(match,'Expected explicit continuation choice');return match[1];
+          }
+          return method==='create'?'2':'3';
+        }
+        if(question.startsWith('Nano access:')){
+          if(phase==='cancel')throw Object.assign(new Error('Fixture cancellation after recovery storage'),{code:'CANCELLED'});
+          return '1';
+        }
+        if(question.includes('Type APPROVE to confirm:'))return terminalPrompt(question);
+        throw Error('Unexpected fixture prompt');
+      }};
+    if(phase==='cancel'){
+      await assert.rejects(prepareNanoWalletInteractive(options),{code:'CANCELLED'});
+      process.stdout.write('Cancelled after protected recovery; no plan returned.\\n');
+    }else{
+      const result=await setupNanoWalletInteractive(options);
+      assert.equal(result.directory,join(home,'wallets',phase==='new'?'nano-new-2':'nano-new'));
+      process.stdout.write('Prepared recovery continued through exact approval.\\n');
+    }
+  `;
+  async function run(phase,steps){
+    const command=[process.execPath,'--input-type=module','--eval',source,home,phase,method];
+    const raw=await execute('python3',[tty,JSON.stringify({command,steps,timeoutSeconds:20})],{timeout:25000,maxBuffer:1048576});
+    const metadata=JSON.parse(raw.stdout),transcript=Buffer.from(metadata.transcriptBase64,'base64').toString('utf8');
+    assert.equal(metadata.timedOut,false);assert.equal(metadata.stepsAnswered,steps.length);
+    assert.equal(metadata.exitCode,0,transcript.replaceAll(phrase,'[fixture recovery]').replaceAll(secondPhrase,'[fixture recovery]'));
+    return transcript;
+  }
+  const storageSteps=fixturePhrase=>[{prompt:'Type yes to store this shared recovery phrase in the OS password store: ',response:'yes'},
+    ...(method==='import'?[{prompt:'Recovery phrase (hidden): ',response:fixturePhrase,hidden:true}]:[])];
+  // When recovery is stored and the user cancels at access selection before a plan can be persisted.
+  await run('cancel',storageSteps(phrase));
+  const preparedSource=join(home,'wallets','nano-recovery'),preparedState=await readFile(join(preparedSource,'state.sqlite'));
+  await assert.rejects(stat(join(home,'wallets','nano-new','wallet.json')),{code:'ENOENT'});
+  assert.equal((await readFile(join(home,'fixture-store-operations'),'utf8')).trim(),'store');
+  // Then a fresh invocation explicitly offers continuation without another import or OS-store write.
+  const resumed=await run('resume',[{prompt:'Type APPROVE to confirm: ',response:'APPROVE'}]);
+  assert.match(resumed,/Continue prepared recovery at/);assert.equal(resumed.includes('Type yes to store'),false);
+  const createdPath=join(home,'wallets','nano-new','wallet.json'),created=await readFile(createdPath),config=JSON.parse(created);
+  assert.equal(config.keySource.recoverySource.directory,preparedSource);assert.deepEqual(await readFile(join(preparedSource,'state.sqlite')),preparedState);
+  assert.equal((await readFile(join(home,'fixture-store-operations'),'utf8')).trim(),'store');
+  // When another invocation explicitly continues the now configured managed wallet, then requests a genuinely new wallet.
+  const continued=await run('continue-wallet',[{prompt:'Type APPROVE to confirm: ',response:'APPROVE'}]);
+  assert.match(continued,/Continue existing managed wallet at/);assert.deepEqual(await readFile(createdPath),created);
+  await run('new',[...storageSteps(secondPhrase),{prompt:'Type APPROVE to confirm: ',response:'APPROVE'}]);
+  // Then new wallet/source paths and identity are distinct, while both earlier wallets and the original journal remain intact.
+  const next=JSON.parse(await readFile(join(home,'wallets','nano-new-2','wallet.json'),'utf8'));
+  assert.equal(next.keySource.recoverySource.directory,join(home,'wallets','nano-recovery-2'));
+  assert.notEqual(next.sourceAddress,config.sourceAddress);assert.deepEqual(await readFile(createdPath),created);
+  assert.deepEqual(await readFile(join(directory,'wallet.json')),originalConfig);assert.equal(await readFile(journal,'utf8'),'original retained native journal');
+  assert.deepEqual((await readFile(join(home,'fixture-store-operations'),'utf8')).trim().split('\n'),['store','store']);
 });

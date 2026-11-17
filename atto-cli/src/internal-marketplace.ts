@@ -40,7 +40,9 @@ export async function signMarketplaceAttoController(options: { directory: string
   finally { await application.close(); }
 }
 
-export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, type MarketplaceWalletSetupSnapshot } from './marketplace/wallet-setup.js';
+export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, marketplacePaymentsUsable,
+  marketplaceSpendingPolicyBounded, validateMarketplacePaymentCap, inspectMarketplacePaymentIntent, prepareMarketplacePayments,
+  type MarketplaceWalletSetupSnapshot, type MarketplacePaymentMode, type MarketplacePaymentIntent, type MarketplacePaymentPlan } from './marketplace/wallet-setup.js';
 
 export { assertPrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissions, syncPrivateDirectory, type PrivatePath } from './storage/private-permissions.js';
 export { parseRelayOffer, decodePaymentHeader, relayPaymentPayload, relayProofFromHeader, relayEvidenceBinding, validateRelayProof, validateRelayOfferRefresh,

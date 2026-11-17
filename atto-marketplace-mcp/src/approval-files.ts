@@ -92,6 +92,28 @@ export function approvalResponsePath(home: string, profileId: string, handoffId:
   return join(resolve(home), 'approvals', profileId, `${handoffId}.response.json`);
 }
 
+/** Only ENOENT beneath safe private directories proves an unsigned handoff has no response. */
+export function approvalResponseIsAbsent(home: string, profileId: string, handoffId: string): boolean {
+  const path = approvalResponsePath(home, profileId, handoffId);
+  const root = resolve(home);
+  assertPrivateDirectory(root, false);
+  for (const directory of [join(root, 'approvals'), join(root, 'approvals', profileId)]) {
+    try { lstatSync(directory); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw invalidFile(); }
+    assertPrivateDirectory(directory, false);
+  }
+  try {
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
+      || (process.platform !== 'win32' && (info.uid !== process.getuid?.() || (info.mode & 0o777) !== PRIVATE_FILE_MODE))) throw invalidFile();
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    if (error instanceof ProfileError) throw error;
+    throw invalidFile();
+  }
+}
+
 export function approvalRequestDigest(request: MarketplaceProofApprovalRequest): string {
   // Keep the approval envelope's digest implementation identical to the wallet helper.
   return createHash('sha256').update(canonicalJson(request), 'utf8').digest('hex');

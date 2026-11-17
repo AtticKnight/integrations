@@ -21,11 +21,21 @@ export function absoluteDirectory(input:string):string {
   return normalize(expanded);
 }
 export async function yesNo(prompt:Prompt,question:string,defaultYes:boolean):Promise<boolean> {
-  const value=(await prompt(`${question} ${defaultYes?'[Y/n]':'[y/N]'}: `)).toLowerCase();
-  if(!value)return defaultYes;if(value==='y'||value==='yes')return true;if(value==='n'||value==='no')return false;
-  throw new ProfileError('SETUP_USAGE','Answer yes or no.');
+  for(;;){
+    const value=(await prompt(`${question} ${defaultYes?'[Y/n]':'[y/N]'}: `)).toLowerCase();
+    if(!value)return defaultYes;if(value==='y'||value==='yes')return true;if(value==='n'||value==='no')return false;
+    process.stderr.write('Answer yes or no.\n');
+  }
 }
 export async function requiredText(prompt:Prompt,label:string,fallback?:string):Promise<string> {
   const value=await prompt(`${label}${fallback?` [${fallback}]`:''}: `)||fallback;
   if(!value||/[\0\r\n]/.test(value))throw new ProfileError('SETUP_USAGE',`${label} is required.`);return value;
+}
+
+export async function menuChoice(prompt:Prompt,question:string,choices:readonly string[],fallback:string):Promise<string> {
+  for(;;){
+    const value=await prompt(question)||fallback;
+    if(choices.includes(value))return value;
+    process.stderr.write(`Choose ${choices.join(', ')}.\n`);
+  }
 }

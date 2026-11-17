@@ -1,3 +1,4 @@
+import { takeJsonFlag, terminalFields, writeTerminalResult } from './terminal-output.js';
 import { defaultMarketplaceHome } from './defaults.js';
 import { existsSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
@@ -8,15 +9,24 @@ import { loadConfiguration, signMarketplaceNanoController } from '@attocash/atto
 import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { canonicalJson } from './canonical-json.js';
+import {expiredUnsignedLoginApproval,expiredLoginRetry,walletConsentRequired} from './setup.js';
 import { validateTypedApproval } from './approval-validation.js';
-import { approvalRequestDigest, approvalRequestPath, approvalResponsePath, readApprovalRequest, readApprovalResponse,
+import { approvalRequestDigest, approvalRequestPath, approvalResponsePath, approvalResponseIsAbsent, readApprovalRequest, readApprovalResponse,
   validateApprovalResponse, verifyApprovalSignature, writeApprovalResponse, type MarketplaceProofApprovalRequest } from './approval-files.js';
 
-export const approvalUsage = 'atto-marketplace-mcp approve <private-request-file> [--home <private-home>]';
+export const approvalUsage = 'atto-marketplace-mcp approve <private-request-file> [--home <private-home>] [--json]';
+
+export interface CombinedWalletConsent {
+  expectedPayload:string;
+  review:string;
+  controller:{directory:string;network:string;address:string;index:number};
+  validate():Promise<void>;
+  commit(assertCurrent:()=>Promise<void>):Promise<void>;
+}
 
 /** A one-off local typed approval; no raw signing or standalone wallet connection is involved. */
 export async function approveMarketplaceController(requestPath: string, options: {
-  home: string; env: NodeJS.ProcessEnv; prompt?: (preview: string) => boolean | Promise<boolean>;
+  home: string; env: NodeJS.ProcessEnv; json?: boolean; walletConsent?:CombinedWalletConsent; prompt?: (preview: string) => boolean | Promise<boolean>;
 }): Promise<{ responsePath: string; recovered: boolean }> {
   requireTerminal();
   const home = resolve(options.home);
@@ -29,22 +39,66 @@ export async function approveMarketplaceController(requestPath: string, options:
   validateTypedApproval(request, { allowExpired: true });
   const responsePath = approvalResponsePath(home, profileId, handoffId);
   const recovering = existsSync(responsePath);
-  const originalPin = await pinnedProfile(home, request, recovering);
-  const native = await nativeIdentity(env, request);
+  const consent=options.walletConsent;
+  const consentStore=await MarketplaceProfileStore.open(home);
+  let consentPayload:string|undefined;
+  try{
+    const setup=consentStore.getSetupState(profileId);
+    if(setup&&JSON.parse(setup.privatePayload).walletConsent){
+      if(!consent||consent.expectedPayload!==setup.privatePayload||request.purpose!=='login')throw walletConsentRequired(home,profileId);
+      consentPayload=setup.privatePayload;
+    }else if(consent)throw new ProfileError('APPROVAL_CHANGED','This wallet review no longer owns the pending login.');
+  }finally{consentStore.close();}
+  if(consentPayload&&!approvalResponseIsAbsent(home,profileId,handoffId))throw walletConsentRequired(home,profileId);
+  if(consent&&(consent.controller.address!==request.controller.address||consent.controller.index!==request.controller.index))throw invalid();
+  let originalPin = await pinnedProfile(home, request, recovering);
+  if(!recovering)await validateFresh(request);
+  let expectedSetupPayload=consentPayload;
+  let consentPending=Boolean(consentPayload);
+  let native:Awaited<ReturnType<typeof nativeIdentity>>=consent
+    ? {directory:consent.controller.directory,network:consent.controller.network}:await nativeIdentity(env, request);
+  if(consent)await consent.validate();
   validateTypedApproval(request, { nativeNetwork: native.network, allowExpired: true });
   if (recovering) {
     const saved = validateApprovalResponse(request, readApprovalResponse(home, profileId, handoffId));
     await verifyApprovalSignature(request, saved);
     return { responsePath, recovered: true };
   }
-  validateTypedApproval(request, { nativeNetwork: native.network });
-  const preview = `Review this exact Marketplace controller action:\n${JSON.stringify({
-    walletDirectory: native.directory, nativeNetwork: native.network, requestDigest: approvalRequestDigest(request), ...request,
-  }, null, 2)}\nThis one-off terminal approval authorizes only these exact typed terms.`;
+  await validateFresh(request, native.network);
+  const details = { walletDirectory: native.directory, nativeNetwork: native.network,
+    requestDigest: approvalRequestDigest(request), ...request };
+  const summary = { marketplaceOrigin: request.marketplaceOrigin, audience: request.audience,
+    walletDirectory: native.directory, controllerNetwork: request.controller.network,
+    nativeNetwork: native.network, controllerAddress: request.controller.address, controllerIndex: request.controller.index,
+    purpose: request.purpose, action: request.action, expiresAt: request.challenge.expiresAt };
+  const terms=options.json?JSON.stringify(details,null,2):terminalFields(summary);
+  const preview=consent
+    ? `${consent.review}\n\nReview Marketplace setup:\n${terms}\nThis approval saves the wallet permissions above and signs in to Marketplace with this exact request.`
+    : `Review this exact Marketplace controller action:\n${terms}\nThis one-off terminal approval authorizes only these exact typed terms.`;
   if (!await (options.prompt ?? confirm)(preview)) throw new ProfileError('APPROVAL_DECLINED', 'The Marketplace controller approval was declined.');
   requireTerminal();
   const currentRequest = await assertUnchanged();
-  validateTypedApproval(currentRequest, { nativeNetwork: native.network });
+  await validateFresh(currentRequest, native.network);
+  if(consent&&consentPayload){
+    await consent.validate();
+    await assertCurrentConsent();
+    await consent.commit(assertCurrentConsent);
+    await consent.validate();
+    await assertCurrentConsent();
+    const store=await MarketplaceProfileStore.open(home);
+    try{
+      const saved=JSON.parse(consentPayload) as Record<string,unknown>;delete saved.walletConsent;
+      const clearedPayload=JSON.stringify(saved);
+      if(!store.transitionSetupState(profileId,'LOGIN_APPROVAL','LOGIN_APPROVAL',clearedPayload,consentPayload))throw new ProfileError('APPROVAL_CHANGED','A newer setup owns this login; approved wallet settings were preserved.');
+      expectedSetupPayload=clearedPayload;
+    }finally{store.close();}
+    consentPending=false;
+    originalPin=await pinnedProfile(home,request);
+    native=await nativeIdentity(managedWalletEnvironment(home,options.env),request);
+    await consent.validate();
+    await assertUnchanged();
+    await validateFresh(currentRequest,native.network);
+  }
   // Never replace a competing response. Its complete terms and signature must match this request.
   if (existsSync(responsePath)) {
     const saved = validateApprovalResponse(currentRequest, readApprovalResponse(home, profileId, handoffId));
@@ -62,20 +116,52 @@ export async function approveMarketplaceController(requestPath: string, options:
     } });
   }
   await assertUnchanged();
-  validateTypedApproval(currentRequest, { nativeNetwork: native.network });
+  await validateFresh(currentRequest, native.network);
   const response = { version: 1 as const, type: 'marketplace-controller-approval-response' as const,
     profileId, handoffId, requestDigest: approvalRequestDigest(currentRequest), challengeId: currentRequest.challenge.challengeId,
     message: currentRequest.challenge.message, signature, controllerAddress: currentRequest.controller.address,
     controllerIndex: currentRequest.controller.index };
   await verifyApprovalSignature(currentRequest, response);
+  await validateFresh(currentRequest,native.network);
   await writeApprovalResponse(home, currentRequest, response);
   return { responsePath, recovered: false };
 
+  async function assertCurrentConsent():Promise<void>{
+    const current=readApprovalRequest(home,profileId,handoffId);
+    if(approvalRequestDigest(current)!==approvalRequestDigest(request))throw new ProfileError('APPROVAL_CHANGED','The exact login request changed before wallet commit.');
+    const store=await MarketplaceProfileStore.open(home);
+    try{
+      const pending=store.getSetupState(profileId);
+      if(pending?.state!=='LOGIN_APPROVAL'||pending.privatePayload!==consentPayload)throw new ProfileError('APPROVAL_CHANGED','The login setup changed before wallet commit.');
+    }finally{store.close();}
+    if(!approvalResponseIsAbsent(home,profileId,handoffId))throw new ProfileError('APPROVAL_CHANGED','A login response appeared before wallet consent completed.');
+    await validateFresh(current,native.network);
+  }
+
+  async function validateFresh(current:MarketplaceProofApprovalRequest,nativeNetwork?:string):Promise<void> {
+    try{validateTypedApproval(current,nativeNetwork?{nativeNetwork}:{});}
+    catch(error){
+      if(error instanceof ProfileError&&error.code==='APPROVAL_EXPIRED'&&current.purpose==='login'){
+        const store=await MarketplaceProfileStore.open(home);
+        try{
+          const expired=expiredUnsignedLoginApproval(store,profileId,home);
+          if(expired?.request.handoffId===handoffId)throw expiredLoginRetry(home,profileId);
+        }finally{store.close();}
+      }
+      throw error;
+    }
+  }
+
   async function assertUnchanged(): Promise<MarketplaceProofApprovalRequest> {
+    if(consent){
+      await consent.validate();
+      const store=await MarketplaceProfileStore.open(home);
+      try{const setup=store.getSetupState(profileId);if(setup?.state!=='LOGIN_APPROVAL'||setup.privatePayload!==expectedSetupPayload)throw new ProfileError('APPROVAL_CHANGED','The reviewed setup payload changed.');}finally{store.close();}
+    }
     const currentRequest = readApprovalRequest(home, profileId, handoffId);
     if (approvalRequestDigest(currentRequest) !== approvalRequestDigest(request)
       || await pinnedProfile(home, currentRequest) !== originalPin
-      || canonicalJson(await nativeIdentity(managedWalletEnvironment(home, options.env), currentRequest)) !== canonicalJson(native)) {
+      || (!consentPending&&canonicalJson(await nativeIdentity(managedWalletEnvironment(home, options.env), currentRequest)) !== canonicalJson(native))) {
       throw new ProfileError('APPROVAL_CHANGED', 'The request, selected wallet, or pinned Marketplace profile changed during terminal review. Review its current state again.');
     }
     return currentRequest;
@@ -83,6 +169,7 @@ export async function approveMarketplaceController(requestPath: string, options:
 }
 
 export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  const selected = takeJsonFlag(argv); argv = selected.argv;
   if (argv.length === 1 && ['--help','-h'].includes(argv[0]!)) { process.stdout.write(`${approvalUsage}\n`); return; }
   const path = argv[0];
   if (!path) throw new ProfileError('SETUP_USAGE', approvalUsage);
@@ -93,17 +180,19 @@ export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promi
   }
   home ??= env.MARKETPLACE_MCP_HOME ?? (resolve(path).includes(`${sep}approvals${sep}`)
     ? dirname(dirname(dirname(resolve(path)))) : defaultMarketplaceHome(env));
-  const result = await approveMarketplaceController(path, { home, env });
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+  const result = await approveMarketplaceController(path, { home, env, json: selected.json });
+  writeTerminalResult(result, selected.json);
 }
 
 async function pinnedProfile(home: string, request: MarketplaceProofApprovalRequest, recovery = false): Promise<string> {
   const store = await MarketplaceProfileStore.open(home);
   try {
     let pin: Record<string, unknown>;
+    let setupPayload:string|undefined;
     const setup = store.getSetupState(request.profileId);
     if ((request.purpose === 'login' && setup) || (setup && !store.listProfileIds().includes(request.profileId))) {
       if (!setup) throw invalid();
+      setupPayload=setup.privatePayload;
       const saved = JSON.parse(setup.privatePayload) as Record<string, unknown>;
       const prepared = saved.request as MarketplaceProofApprovalRequest | undefined;
       if (!prepared || approvalRequestDigest(prepared) !== approvalRequestDigest(request)
@@ -134,7 +223,7 @@ async function pinnedProfile(home: string, request: MarketplaceProofApprovalRequ
       || pin.accountId !== request.accountId || pin.identityId !== request.identityId
       || pin.controllerNetwork !== request.controller.network || pin.controllerAddress !== request.controller.address
       || pin.controllerIndex !== request.controller.index) throw invalid();
-    return canonicalJson(pin);
+    return canonicalJson({...pin,...(setupPayload?{setupPayload}:{})});
   } catch (error) {
     if (error instanceof ProfileError) throw error;
     throw invalid();

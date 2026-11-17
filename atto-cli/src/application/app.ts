@@ -170,14 +170,16 @@ export class AttoApplication {
     }));
   }
 
-  async approveLimitsProposal(id: string) {
+  async approveLimitsProposal(id: string, validateReviewedState?: () => void, inspectApprovedState?: () => void) {
     this.requireLocalApproval();
     return this.store.withWalletLock(async () => {
+      validateReviewedState?.();
       const proposal = this.ledger.reviewProposal(id, this.proposalWallet());
       if (proposal.status === 'pending' && proposal.pool) {
         for (const index of proposal.pool.indexes) await this.deriveAddress(index);
       }
       this.ledger.approveProposal(id, this.proposalWallet());
+      inspectApprovedState?.();
       return this.ledger.usage();
     });
   }

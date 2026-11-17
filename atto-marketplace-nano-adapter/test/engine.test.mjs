@@ -965,3 +965,49 @@ test('a killed unsigned Nano relay refreshes only its expired offer while a live
         assert.equal(afterJournal.find(original.id).blockJson,after.blockJson);afterJournal.close();
     } finally {Date.now=realNow;}
 });
+
+test('Unlimited retains spend history so a later finite policy counts earlier transfers', async t=>{
+    // Given explicit paired-null Unlimited spending and the usual durable journal.
+    const f=await fixture(t,{limit:null}),wallet=f.open(),first=transfer(f,'200');
+    // When transfers above the old fixture cap confirm before the policy is tightened.
+    assert.equal((await wallet.call('transfer.send',first)).state,'CONFIRMED');
+    assert.equal((await wallet.call('transfer.send',transfer(f,'150'))).state,'CONFIRMED');
+    await approveNanoWalletPolicy({dataDir:f.dir,grants:f.grants,limits:{maxPaymentAtomic:'250',rolling24hAtomic:'400'},terminalConfirmed:true});
+    // Then prior Unlimited spending consumes the finite rolling ceiling and exact retries remain immutable.
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'60')),{code:'DAILY_LIMIT'});
+    assert.equal((await wallet.call('transfer.send',first)).state,'CONFIRMED');
+    assert.equal(f.published.length,2);
+    const journal=new NanoJournal(f.dir);
+    try {assert.equal(journal.db.prepare("SELECT COUNT(*) AS count FROM operations WHERE kind='transfer' AND state='CONFIRMED'").get().count,2);} finally {journal.close();}
+});
+
+test('Unlimited preserves unknown-source fencing, idempotency and exact signed bytes', async t=>{
+    // Given an Unlimited wallet whose first native publication has an unknown outcome.
+    const f=await fixture(t,{limit:null}),wallet=f.open(),args=transfer(f,'200');f.mode='throw';
+    // When a different transfer and an exact retry are requested.
+    const first=await wallet.call('transfer.send',args);
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'1')),{code:'SOURCE_FENCED'});
+    await assert.rejects(wallet.call('transfer.send',{...args,amountAtomic:'201'}),{code:'HANDLE_REUSE'});
+    const replay=await wallet.call('transfer.send',args);
+    // Then the journal fences the account and reuses the original signed candidate.
+    assert.equal(first.state,'UNKNOWN');assert.equal(replay.sendHash,first.sendHash);
+    assert.deepEqual(f.published[0].toWire(),f.published[1].toWire());
+});
+
+test('Unlimited still revalidates zero caps and transfer permission immediately before signing', async t=>{
+    for(const revoked of ['zero','grant']) {
+        // Given Unlimited spending while proof-of-work generation yields to a policy change.
+        const f=await fixture(t,{limit:null}),wallet=f.open(),generate=f.rpc.generateWork.bind(f.rpc);
+        f.rpc.generateWork=async(...args)=>{
+            const result=await generate(...args);
+            await approveNanoWalletPolicy({dataDir:f.dir,grants:{...f.grants,externalTransfers:revoked!=='grant'},
+                limits:revoked==='zero'?{maxPaymentAtomic:'0',rolling24hAtomic:'0'}:{maxPaymentAtomic:null,rolling24hAtomic:null},terminalConfirmed:true});
+            return result;
+        };
+        // When the unsigned transfer resumes after tightening or revocation.
+        await assert.rejects(wallet.call('transfer.send',transfer(f,'200')),{code:revoked==='zero'?'SPEND_LIMIT':'PERMISSION_DENIED'});
+        // Then no block is signed/published and the unsigned reservation is cleared.
+        assert.equal(f.published.length,0);
+        const journal=new NanoJournal(f.dir);try{assert.equal(journal.pendingForSource(f.source),undefined);}finally{journal.close();}
+    }
+});

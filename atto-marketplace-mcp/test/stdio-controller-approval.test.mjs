@@ -217,7 +217,7 @@ test('Product publication basis ceilings survive private storage and scoped-prof
     await client.close();clientClosed=true;
     fixture.store.close();storeClosed=true;
     let activationOutput='';const originalWrite=process.stdout.write;
-    process.stdout.write=(chunk,...rest)=>{activationOutput+=String(chunk);return true;};
+    process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);activationOutput+=chunk;return true;};
     try {await runSetup(['--profile','shop-publisher','--home',fixture.home,'--from-profile','agent','--credential-id',apiKeyId],{});}
     finally {process.stdout.write=originalWrite;}
     assert.equal(JSON.stringify(activationOutput).includes('private-product-publisher-key'),false);
@@ -290,7 +290,7 @@ test('credential rotation preserves backend grants through explicit activation a
     fixture.store.close(); storeClosed=true;
     let output='';
     const originalWrite=process.stdout.write;
-    process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
+    process.stdout.write=(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output+=chunk;return true;};
     try { await runSetup(['--profile','worker-rotated','--home',fixture.home,'--from-profile','agent','--credential-id',newId],{}); }
     finally { process.stdout.write=originalWrite; }
     assert.equal(JSON.stringify(output).includes(secret),false);

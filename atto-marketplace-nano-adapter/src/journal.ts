@@ -96,9 +96,9 @@ export class NanoJournal {
     close(): void {
         this.db.close();
     }
-    checkLimit(source: string, network: string, now: number, limit: bigint): void {
+    checkLimit(source: string, network: string, now: number, limit: bigint | null): void {
         this.transaction(() => {
-            if (this.reservedSpend(source, network, now) > limit)
+            if (limit !== null && this.reservedSpend(source, network, now) > limit)
                 fail('DAILY_LIMIT');
         });
     }
@@ -150,7 +150,7 @@ export class NanoJournal {
                 fail('JOURNAL_CONFLICT', 'An interrupted preparation contains unexpected signed candidate fields.');
         }
     }
-    begin(input: Pick<JournalRecord, 'id' | 'kind' | 'digest' | 'requestJson' | 'uniqueId' | 'source' | 'network' | 'amount' | 'destination'>, now: number, limit: bigint): JournalRecord {
+    begin(input: Pick<JournalRecord, 'id' | 'kind' | 'digest' | 'requestJson' | 'uniqueId' | 'source' | 'network' | 'amount' | 'destination'>, now: number, limit: bigint | null): JournalRecord {
         return this.transaction(() => {
             const prior = this.find(input.id);
             if (prior) {
@@ -189,7 +189,7 @@ export class NanoJournal {
             if (alias)
                 fail('INTENT_ALREADY_USED');
             const reserved = this.reservedSpend(input.source, input.network, now);
-            if (reserved + BigInt(input.amount) > limit)
+            if (limit !== null && reserved + BigInt(input.amount) > limit)
                 fail('DAILY_LIMIT', 'The Nano payment exceeds the approved rolling 24-hour spend ceiling.');
             this.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner) VALUES(?,?,?,?,?,?,?,?,?,?,'PREPARING',?)`).run(input.id, input.kind, input.digest, input.requestJson, input.uniqueId, input.source, input.network, input.amount, input.destination, now, this.token);
             return this.find(input.id)!;

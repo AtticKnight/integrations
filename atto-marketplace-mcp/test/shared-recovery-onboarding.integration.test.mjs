@@ -94,9 +94,17 @@ esac
   const storeCount = async environment => (await readFile(environment.ATTO_TEST_RECOVERY_OPERATIONS, 'utf8')).trim().split('\n').filter(op => op === 'store').length;
   assert.equal(await storeCount(env), 1);
   assertNoAttoAuthority(await walletStatus(source, env));
-  const status = await execute(process.execPath, [main, 'wallet', 'status', '--asset', 'XNO'], { env: childEnvironment(env) });
+  const status = await execute(process.execPath, [main, 'wallet', 'status', '--asset', 'XNO', '--json'], { env: childEnvironment(env) });
   assert.deepEqual(JSON.parse(status.stdout), {asset: 'XNO', address: nanoAddress, index: 0, network: 'nano:dev',
     permissions: { externalTransfers: false, receive: false}});
+  // When the configured Nano identity is read in the default terminal mode.
+  const readableStatus=await execute(process.execPath,[main,'wallet','status','--asset','XNO'],{env:childEnvironment(env)});
+  // Then exact public wallet identity and authority remain readable without any seed or JSON result.
+  assert.ok(readableStatus.stdout.includes(`Address: ${nanoAddress}`));
+  assert.match(readableStatus.stdout,/External Transfers: false/);
+  assert.doesNotMatch(readableStatus.stdout,/^\{|"asset"|signature/);
+  assert.equal(readableStatus.stdout.includes(phrase),false);
+
   const sourceBefore = await snapshot(source);
   const replayed = await terminal([process.execPath, main, ...setup], env, [consent]);
   assert.equal(replayed.exitCode, 0, replayed.transcript);
@@ -124,7 +132,7 @@ esac
   assert.equal(imported.exitCode, 0, imported.transcript); assertNoAttoAuthority(await walletStatus(existingSource, existingEnv));
   const original = await snapshot(existingSource);
   const reused = await terminal([process.execPath, main, ...setup, '--recovery-wallet-dir', existingSource], existingEnv, [consent]);
-  assert.equal(reused.exitCode, 0, reused.transcript); assert.match(reused.transcript, new RegExp(`Public address: ${nanoAddress}`));
+  assert.equal(reused.exitCode, 0, reused.transcript); assert.match(reused.transcript, new RegExp(`Public Address: ${nanoAddress}`));
   const existingNano = JSON.parse(await readFile(join(existingHome, 'wallets/nano/wallet.json'), 'utf8'));
   const afterSource=await snapshot(existingSource);
   const {'marketplace-nano-wallets':markers,...originalSourceFiles}=afterSource;

@@ -1,6 +1,8 @@
 # Marketplace Nano wallet adapter
 
-Private local Nano wallet used by Marketplace MCP. It holds native key access, signs Marketplace payments locally, and broadcasts standalone transfers locally, with configured source/index/network/RPC, per-payment/daily limits, durable signed state blocks and exact-candidate recovery. The Marketplace backend receives no customer key material. For x402 it relays only the complete unchanged payment that this wallet authorized.
+Private local Nano wallet used by Marketplace MCP. It holds native key access, signs Marketplace payments locally, and broadcasts standalone transfers locally, with configured source/index/network/RPC, approved spending access, durable signed state blocks and exact-candidate recovery. The Marketplace backend receives no customer key material. For x402 it relays only the complete unchanged payment that this wallet authorized.
+
+Spending caps are either finite raw strings or explicitly paired nulls: `{maxPaymentAtomic:null,rolling24hAtomic:null}` means Unlimited spending. Unlimited can spend the available balance, including future deposits. Zero still blocks payments, and missing, malformed or mixed-null caps are rejected. Unlimited skips only ceiling comparisons: it retains the external-transfer grant, balance checks, durable spend history, reservations, source-account lane, exact-request replay checks and policy revalidation before signing. Tightening a later policy counts transfers recorded while Unlimited was approved.
 
 Use the existing externalTransfers grant for direct Marketplace requirement payments. NOMS `payment evidence` proofs require that grant and the exact configured origin/audience/network/sender frame. Other controller purposes retain their explicit grants/typed terminal approvals; ordinary Ed25519 or native transaction signing is not NOMS. A separately configured controller directory is used for identity purposes, while payment evidence uses the actual sending wallet.
 

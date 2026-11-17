@@ -70,3 +70,16 @@ for (const help of ['--help', '-h']) {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 }
+
+for(const args of [['--json','setup'],['setup','--json'],['--json','wallet','setup'],['wallet','setup','--json']]){
+  test(`explicit JSON does not bypass guided terminal approval: ${args.join(' ')}`,async()=>{
+    // Given piped stdio and a command that normally requires a person's terminal.
+    const main=fileURLToPath(new URL('../dist/main.js',import.meta.url));
+    // When JSON is selected on either side of the command.
+    await assert.rejects(execute(process.execPath,[main,...args],{timeout:10000}),error=>{
+      // Then the command reaches the same terminal gate, without falling into MCP server dispatch.
+      assert.equal(error.code,1);assert.match(error.stderr,/requires an interactive local terminal/);
+      assert.doesNotMatch(error.stderr,/Unknown.*option/);return true;
+    });
+  });
+}

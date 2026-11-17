@@ -208,7 +208,7 @@ export class MarketplaceProfileStore {
 
   close(): void { this.db.close(); }
 
-  createProfile(profile: NewProfile): void {
+  createProfile(profile: NewProfile, expectedSetup?: {state:string;privatePayload:string}): void {
     assertProfileId(profile.id);
     assertOrigin(profile.origin);
     if (!/^[^\r\n\0]{1,255}$/.test(profile.audience) || profile.audience.trim()!==profile.audience) {
@@ -226,6 +226,10 @@ export class MarketplaceProfileStore {
       throw new ProfileError('CONTROLLER_INDEX', `The ${profile.controllerNetwork} controller wallet index must be from 0 through ${maximumIndex}.`);
     }
     this.transaction(() => {
+      if(expectedSetup){
+        const pending=this.getSetupState(profile.id);
+        if(pending?.state!==expectedSetup.state||pending.privatePayload!==expectedSetup.privatePayload)throw new ProfileError('SETUP_BUSY','This result no longer owns the profile setup. Continue the current setup instead.');
+      }
       this.db.prepare(`INSERT INTO profiles (
         id,origin,audience,account_id,agent_id,identity_id,controller_network,controller_address,controller_index,
         auth_mode,api_key,api_scopes,publish_atto_limit,publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,
@@ -239,6 +243,7 @@ export class MarketplaceProfileStore {
         profile.accessToken ?? null, profile.accessExpiresAt ?? null, profile.refreshToken ?? null,
         profile.refreshExpiresAt ?? null,
       );
+      if(expectedSetup)this.db.prepare('DELETE FROM setup_state WHERE profile_id=?').run(profile.id);
     });
   }
 

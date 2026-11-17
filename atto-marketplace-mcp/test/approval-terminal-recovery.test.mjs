@@ -79,11 +79,20 @@ for (const source of ['native-seed', 'os-keystore']) {
       // When the identical request is recovered after expiration with no signing material available.
       assert.deepEqual(await approveMarketplaceController(path, options), {responsePath, recovered: true});
       // The terminal command also infers this same private home from its native request path.
-      const output = [];
-      const write = t.mock.method(process.stdout, 'write', chunk => { output.push(String(chunk)); return true; });
-      try { await runApproval([path], options.env); }
+      const output = [], originalWrite = process.stdout.write;
+      const write = t.mock.method(process.stdout, 'write', (chunk, ...rest) => { if (typeof chunk !== 'string') return originalWrite.call(process.stdout, chunk, ...rest); output.push(chunk); return true; });
+      try { await runApproval([path,'--json'], options.env); }
       finally { write.mock.restore(); }
       assert.deepEqual(JSON.parse(output.join('')), {responsePath, recovered: true});
+      // When the same durable approval is recovered with the default terminal output.
+      output.length=0;
+      const humanWrite=t.mock.method(process.stdout,'write',(chunk,...rest)=>{if(typeof chunk!=='string')return originalWrite.call(process.stdout,chunk,...rest);output.push(chunk);return true;});
+      try {await runApproval([path],options.env);}finally{humanWrite.mock.restore();}
+      // Then the public handoff path and recovery status are readable without signature or JSON output.
+      assert.ok(output.join('').includes(`Approval file: ${responsePath}`));
+      assert.match(output.join(''),/Recovered: true/);
+      assert.doesNotMatch(output.join(''),/signature|fixture-session-token|fixture-refresh-token|^\{/m);
+
 
       // Then its exact response is retained without a key read or another consent prompt.
       assert.deepEqual(await readFile(responsePath), originalResponse);

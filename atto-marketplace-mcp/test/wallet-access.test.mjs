@@ -94,8 +94,33 @@ test('Atto Marketplace access approval preserves standalone wallet configuration
     try{assert.deepEqual(await after.call('wallet_status',{}),before);}finally{await after.close();}
     const prior=readWalletSelection(f.home);
     await assert.rejects(approveAttoWalletAccess({home:f.home,env:f.env,directory:f.directory,index:0,
-      grants:{externalTransfers:true},prompt:async()=> 'DECLINE'}),{code:'APPROVAL_DECLINED'});
+      grants:{externalTransfers:true},prompt:async()=>assert.fail('Ineligible native authority must fail before grant approval')}),{code:'WALLET_SETUP_REQUIRED'});
     assert.deepEqual(readWalletSelection(f.home),prior);
+  }finally{
+    [process.stdin,process.stderr].forEach((stream,index)=>descriptors[index]?Object.defineProperty(stream,'isTTY',descriptors[index]):delete stream.isTTY);
+  }
+});
+
+test('Atto Marketplace purpose approval accepts native Unlimited spend authority without replacing it',async t=>{
+  // Given a selected native account with actual unbounded policy, spend access and pool membership.
+  const f=await fixture(t),phrase=`${'abandon '.repeat(23)}art`;
+  const app=new AttoApplication({directory:f.directory,secrets:{get:async()=>phrase,set:async()=>{}}});
+  await app.createWallet(phrase);app.store.set('spending.mcpAccess','spend');
+  app.ledger.setPolicy({perRequest:null,rolling:[]});
+  const before=await app.call('wallet_status',{}),policy=app.ledger.policy();await app.close();
+  const descriptors=[process.stdin,process.stderr].map(stream=>Object.getOwnPropertyDescriptor(stream,'isTTY'));
+  for(const stream of [process.stdin,process.stderr])Object.defineProperty(stream,'isTTY',{configurable:true,value:true});
+  try{
+    const questions=[];
+    // When the existing purpose command approves only its narrower Marketplace grant.
+    await approveAttoWalletAccess({home:f.home,directory:f.directory,index:0,grants:{externalTransfers:true},prompt:async question=>{
+      questions.push(question);assert.match(question,/^Type APPROVE to save this Marketplace wallet access:/);return 'APPROVE';
+    }});
+    // Then Unlimited is eligible for receiving/sending admission and its native policy is retained exactly.
+    assert.equal(questions.length,1);assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,true);
+    const after=new AttoApplication({directory:f.directory});
+    try{assert.deepEqual(await after.call('wallet_status',{}),before);assert.deepEqual(after.ledger.policy(),policy);
+      assert.deepEqual(selectedAttoWallet(f.env,before).permissions,{externalTransfers:true,receive:true});}finally{await after.close();}
   }finally{
     [process.stdin,process.stderr].forEach((stream,index)=>descriptors[index]?Object.defineProperty(stream,'isTTY',descriptors[index]):delete stream.isTTY);
   }

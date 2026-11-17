@@ -1,11 +1,10 @@
-import { createApplication } from '@attocash/cli/core';
-import {inspectMarketplaceWalletSetup,withUnchangedMarketplaceWalletSetup} from '@attocash/cli/internal-marketplace';
-import { isDeepStrictEqual } from 'node:util';
+import {inspectMarketplaceWalletSetup,withUnchangedMarketplaceWalletSetup,marketplacePaymentsUsable} from '@attocash/cli/internal-marketplace';
 import { defaultMarketplaceHome, managedWalletEnvironment } from './wallet-home.js';
-import { readWalletSelection, saveWalletSelection, type AttoWalletAccess, type WalletSelection } from './wallet-preferences.js';
+import { readWalletSelection, saveWalletSelection, type AttoWalletAccess } from './wallet-preferences.js';
 import { ProfileError } from './profile-store.js';
 import {ensurePrivateDirectory} from './private-directory.js';
 import { requireSetupTerminal, terminalPrompt, yesNo, type Prompt } from './terminal-input.js';
+import { takeJsonFlag, terminalFields, terminalText, writeTerminalResult } from './terminal-output.js';
 
 interface AttoStatus {
   initialized: boolean;
@@ -54,80 +53,36 @@ export function assertAttoWalletWrite(env: NodeJS.ProcessEnv, status: unknown,
 export async function approveAttoWalletAccess(options: {
   home: string; directory: string; index: number; prompt?: Prompt;
   grants?: { externalTransfers: boolean };
+  json?: boolean;
 }): Promise<void> {
   requireSetupTerminal();
   const prompt = options.prompt ?? terminalPrompt;
   const beforeSelection = readWalletSelection(options.home);
-  const app = createApplication({ directory: options.directory });
-  try {
-    const before = statusValue(await app.call('wallet_status', {}));
-    const account = before.addresses.find(value => value.index === options.index);
-    if (!account || !Number.isInteger(options.index) || options.index < 0 || options.index > 0x7fffffff) throw setupRequired();
-    const previous = beforeSelection?.attoDirectory === options.directory
-      && beforeSelection.attoAccess?.fingerprint === before.identity!.fingerprint
-      && beforeSelection.attoAccess.index === options.index
-      && beforeSelection.attoAccess.network === `atto:${before.settings.network.toLowerCase()}`
-      ? beforeSelection.attoAccess : undefined;
-    const externalTransfers = options.grants?.externalTransfers
-      ?? await yesNo(prompt, 'Allow external Atto transfers from this wallet', previous?.externalTransfers ?? false);
-    const access: AttoWalletAccess = { address: account.address, index: account.index,
-      network: `atto:${before.settings.network.toLowerCase()}`, fingerprint: before.identity!.fingerprint,
-      externalTransfers };
-    process.stderr.write(`${JSON.stringify({directory: options.directory, ...access}, null, 2)}\n`
-      + 'Marketplace grants only narrow this wallet’s existing CLI permissions and shared spending limits.\n'
-      + 'Receiving requires an approved external-transfer grant and CLI spend access.\n');
-    if (await prompt('Type APPROVE to save this Marketplace wallet access: ') !== 'APPROVE') {
-      throw new ProfileError('APPROVAL_DECLINED', 'Marketplace wallet access approval was declined.');
-    }
-    requireSetupTerminal();
-    if (!isDeepStrictEqual(beforeSelection, readWalletSelection(options.home))
-      || !isDeepStrictEqual(before, statusValue(await app.call('wallet_status', {})))) {
-      throw new ProfileError('WALLET_CONFIGURATION_CHANGED', 'The selected wallet or its authority changed during review. Repeat approval against its current settings.');
-    }
-    await saveWalletSelection(options.home, { attoDirectory: options.directory, attoAccess: access }, {expected: beforeSelection});
-  } finally { await app.close(); }
-}
-
-/** Review Marketplace purposes once, against an immutable snapshot of existing native authority. */
-export async function approveCompactAttoWalletAccess(options: {
-  home:string; snapshot:Awaited<ReturnType<typeof inspectMarketplaceWalletSetup>>;
-  previous:WalletSelection|undefined; prompt:Prompt;
-}):Promise<'approved'|'advanced'> {
-  requireSetupTerminal();
-  const {home,snapshot,previous,prompt}=options;
-  const saved=previous?.attoDirectory===snapshot.directory&&previous.attoAccess?.fingerprint===snapshot.fingerprint
-    &&previous.attoAccess.address===snapshot.address&&previous.attoAccess.index===snapshot.index
-    &&previous.attoAccess.network===snapshot.network?previous.attoAccess:undefined;
-  const defaultChoice=saved?.externalTransfers?'2':'1';
-  const choice=await prompt(`Atto access: [1] Login only, [2] External transfers (default ${defaultChoice}): `)||defaultChoice;
-  if(!['1','2'].includes(choice))throw new ProfileError('SETUP_USAGE','Choose 1 or 2.');
-  let externalTransfers=choice==='2';
-  const bounded=snapshot.access==='spend'&&snapshot.pool.indexes.includes(snapshot.index)
-    &&(snapshot.policy.perRequest!==null||snapshot.policy.rolling.length>0);
-  if(externalTransfers&&!bounded){
-    process.stderr.write('This account needs existing CLI spend access, pool membership, and bounded spending limits. Marketplace setup will not expand native authority automatically.\n');
-    const next=await prompt('Continue: [1] Login only (default), [2] Advanced native configuration: ')||'1';
-    if(next==='2')return 'advanced';
-    if(next!=='1')throw new ProfileError('SETUP_USAGE','Choose 1 or 2.');
-    externalTransfers=false;
+  const before = await inspectMarketplaceWalletSetup({directory:options.directory,index:options.index});
+  const previous = beforeSelection?.attoDirectory === options.directory
+    && beforeSelection.attoAccess?.fingerprint === before.fingerprint
+    && beforeSelection.attoAccess.index === options.index
+    && beforeSelection.attoAccess.network === before.network ? beforeSelection.attoAccess : undefined;
+  const externalTransfers = options.grants?.externalTransfers
+    ?? await yesNo(prompt, 'Allow external Atto transfers from this wallet', previous?.externalTransfers ?? false);
+  if(externalTransfers&&!marketplacePaymentsUsable(before))throw new ProfileError('WALLET_SETUP_REQUIRED','Payment access requires native spend access and the selected account in the payment pool. Run wallet setup first.');
+  const access: AttoWalletAccess = { address: before.address, index: before.index,
+    network: before.network, fingerprint: before.fingerprint, externalTransfers };
+  const review = {directory: options.directory, ...access, limits:before.formattedLimits};
+  process.stderr.write(`${options.json ? JSON.stringify(review, null, 2) : terminalFields({wallet:before.address,index:before.index,network:before.network,externalTransfers,limits:before.formattedLimits})}\n`
+    + 'Marketplace grants narrow this wallet’s existing CLI permissions and shared spending limits.\n'
+    + (externalTransfers?'Enable payments for this selected wallet and account within these saved limits.\n':''));
+  if (await prompt('Type APPROVE to save this Marketplace wallet access: ') !== 'APPROVE') {
+    throw new ProfileError('APPROVAL_DECLINED', 'Marketplace wallet access approval was declined.');
   }
-  const access:AttoWalletAccess={address:snapshot.address,index:snapshot.index,network:snapshot.network,
-    fingerprint:snapshot.fingerprint,externalTransfers};
-  process.stderr.write(`Atto wallet: ${snapshot.address}\nAccount index: ${snapshot.index} | Network: ${snapshot.network}\n`
-    +`Shared CLI limits: ${snapshot.formattedLimits}\n`
-    +`External transfers: ${externalTransfers?'allowed':'denied'}\n`
-    +'Marketplace purposes share the current CLI authority and spending history. Login proof requires a separate approval.\n');
-  if(await prompt('Type APPROVE to save this Marketplace wallet access: ')!=='APPROVE')throw new ProfileError('APPROVAL_DECLINED','Marketplace wallet access approval was declined.');
   requireSetupTerminal();
-  await withUnchangedMarketplaceWalletSetup({directory:snapshot.directory,index:snapshot.index,expected:snapshot,terminalConfirmed:true},
-    ()=>{
-      ensurePrivateDirectory(home);
-      return saveWalletSelection(home,{attoDirectory:snapshot.directory,attoAccess:access},{expected:previous});
-    });
-  return 'approved';
+  await withUnchangedMarketplaceWalletSetup({directory:before.directory,index:before.index,expected:before,terminalConfirmed:true},
+    ()=>saveWalletSelection(options.home,{attoDirectory:options.directory,attoAccess:access},{expected:beforeSelection}));
 }
 
 export async function runAttoWalletAccessCommand(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  const output = takeJsonFlag(argv);
+  argv = output.argv;
   const command = argv[0];
   const flags = new Set<string>();
   let home: string | undefined;
@@ -146,10 +101,10 @@ export async function runAttoWalletAccessCommand(argv: string[], env: NodeJS.Pro
   if (command === 'policy') {
     await approveAttoWalletAccess({ home: selected.MARKETPLACE_MCP_HOME!,
       directory: selection.attoDirectory!, index: selection.attoAccess.index,
-      grants: { externalTransfers: flags.has('--allow-external-transfers') } });
+      grants: { externalTransfers: flags.has('--allow-external-transfers') }, json: output.json });
   } else if (command !== 'status') throw setupRequired();
   const { callWallet } = await import('./wallet-process.js');
-  process.stdout.write(`${JSON.stringify(await callWallet(selected, {asset: 'ATTO', operation: 'identity.list', input: {}}))}\n`);
+  writeTerminalResult(await callWallet(selected, {asset: 'ATTO', operation: 'identity.list', input: {}}), output.json);
 }
 
 function setupRequired(): ProfileError {

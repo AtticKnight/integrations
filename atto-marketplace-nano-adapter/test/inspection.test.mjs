@@ -88,3 +88,21 @@ test('canonical fixture roots do not allow symlinked wallet ancestors', async t 
  assert.equal((await inspectNanoSeed(seedFile,0)).address,configured.address);
  await assert.rejects(inspectNanoSeed(join(alias,'seed.hex'),0),{code:'PRIVATE_FILE'});
 });
+
+test('spending caps accept only paired explicit nulls or finite atomic strings', async t=>{
+ // Given a valid finite-policy Nano wallet configuration.
+ const root=await mkdtemp(join(tmpdir(),'nano-cap-schema-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const seedFile=join(root,'seed.hex');writeFileSync(seedFile,'05'.repeat(32)+'\n',{mode:0o600});
+ await provisionNanoWallet({dataDir:join(root,'wallet'),seedFile,derivationIndex:0,network:'nano:dev',rpcUrl:'http://localhost:17076',origin:'http://localhost:8080',audience:'caps',terminalConfirmed:true});
+ const config=await inspectNanoWallet(join(root,'wallet'));
+ // When explicit Unlimited, zero and malformed persisted cap pairs are read.
+ assert.deepEqual(validateConfiguration({...config,limits:{maxPaymentAtomic:null,rolling24hAtomic:null}}).limits,{maxPaymentAtomic:null,rolling24hAtomic:null});
+ assert.deepEqual(validateConfiguration({...config,limits:{maxPaymentAtomic:'0',rolling24hAtomic:'0'}}).limits,{maxPaymentAtomic:'0',rolling24hAtomic:'0'});
+ const invalid=[{}, {maxPaymentAtomic:null}, {rolling24hAtomic:null},
+   {maxPaymentAtomic:null,rolling24hAtomic:'1'}, {maxPaymentAtomic:'1',rolling24hAtomic:null},
+   {maxPaymentAtomic:undefined,rolling24hAtomic:undefined}, {maxPaymentAtomic:'null',rolling24hAtomic:'null'},
+   {maxPaymentAtomic:0,rolling24hAtomic:0}, {maxPaymentAtomic:'01',rolling24hAtomic:'10'},
+   {maxPaymentAtomic:'2',rolling24hAtomic:'1'}];
+ // Then every absent, undefined, malformed or mixed-null pair is rejected.
+ for(const limits of invalid)assert.throws(()=>validateConfiguration({...config,limits}));
+});

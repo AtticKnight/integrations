@@ -45,7 +45,7 @@ export function readWalletSelection(home: string): WalletSelection | undefined {
 }
 
 /** Commits a role patch atomically in the existing profile backup boundary. */
-export async function saveWalletSelection(home: string, patch: Partial<WalletSelection>, approval?: {expected: WalletSelection | undefined}): Promise<void> {
+export async function saveWalletSelection(home: string, patch: Partial<WalletSelection>, approval?: {expected: WalletSelection | undefined}): Promise<WalletSelection> {
   validatePatch(patch);
   validateDirectories(patch);
   if (!assertWalletDirectory(home)) throw selectionError();
@@ -73,6 +73,7 @@ export async function saveWalletSelection(home: string, patch: Partial<WalletSel
         selected.attoAccess ? JSON.stringify(selected.attoAccess) : null);
     db.exec('COMMIT');
     transaction = false;
+    return structuredClone(selected);
   } catch (error) {
     if (transaction) { try { db?.exec('ROLLBACK'); } catch { /* Preserve the original failure. */ } }
     throw selectionError(error);

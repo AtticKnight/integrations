@@ -1,16 +1,21 @@
+import { terminalText } from './terminal-output.js';
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { assertPrivatePermissions, initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
 import {
   approveNanoWalletPolicy,
   inspectNanoSeed,
   inspectNanoRecoveryWallet,
-  inspectNanoWallet,
+  loadConfiguration,
+  validateConfiguration,
   MAX_RAW,
   provisionNanoWallet,
   type NanoNetwork,
   type NanoWalletConfiguration,
 } from '@attocash/atto-marketplace-nano-adapter';
+import {menuChoice} from './terminal-input.js';
+import type { DeferredWalletPlan, WalletAccessMode } from './wallet-plan.js';
 import { ProfileError } from './profile-store.js';
 import { marketplaceConnection } from './defaults.js';
 import { readWalletSelection, saveWalletSelection } from './wallet-preferences.js';
@@ -20,6 +25,9 @@ export interface NanoInteractiveSetupOptions {
   env: NodeJS.ProcessEnv;
   origin?: string;
   audience?: string;
+  advanced?: boolean;
+  json?: boolean;
+  resumeIntent?: Record<string, unknown>;
   prompt: (question: string) => Promise<string>;
 }
 
@@ -37,135 +45,351 @@ export function defaultNanoRpcUrl(network: NanoNetwork): string {
   return network === 'nano:mainnet' ? 'https://rpc.nano.to' : 'http://localhost:17076';
 }
 
-/** Terminal-only setup; every prompt and public review precedes wallet mutation. */
+/** Standalone setup owns its one exact approval; guided setup combines the public plan with login. */
 export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOptions): Promise<NanoInteractiveSetupResult> {
+  const plan = await prepareNanoWalletInteractive(options);
+  const wasExisting = hasProfile(plan.wallet.directory);
+  await approve(options, `${plan.review}\nType APPROVE to confirm: `);
+  await plan.validate();
+  const result = await plan.commit() as NanoInteractiveSetupResult;
+  const config = loadConfiguration(result.directory);
+  if (!wasExisting && config.keySource.type === 'shared-recovery') {
+    const previous = readWalletSelection(options.home)?.attoDirectory ?? options.env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR ?? join(options.home, 'wallets', 'atto');
+    await saveWalletSelection(options.home, { attoDirectory: previous && existsSync(join(previous, 'state.sqlite')) ? previous : config.keySource.recoverySource.directory });
+  }
+  return result;
+}
+
+/** Preparation may initialize protected recovery, but never enables payment or headless signing. */
+export async function prepareNanoWalletInteractive(options: NanoInteractiveSetupOptions): Promise<DeferredWalletPlan> {
   requireTerminal();
   if (options.origin !== undefined || options.audience !== undefined) marketplaceConnection(options);
   const home = privatePath(options.home);
+  if (options.resumeIntent) return resumePlan(options, options.resumeIntent);
   const defaultDirectory = privatePath(options.env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR ?? join(home, 'wallets', 'nano'));
-  const mode = await choice(options, 'Nano wallet: derive from your recovery phrase, reuse an adapter profile, or import a private seed file (create/reuse/import)', ['create', 'reuse', 'import'], hasProfile(defaultDirectory) ? 'reuse' : 'create');
-  const directory = privatePath(await answer(options, 'Private Nano wallet directory', defaultDirectory));
-  if (mode === 'reuse') return reuseWallet(options, directory);
+  const selectedExists = hasProfile(defaultDirectory);
+  const selectedRecovery = options.env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR ?? readWalletSelection(home)?.attoDirectory ?? join(home, 'wallets', 'atto');
+  const prepared = options.advanced ? [] : managedNanoChoices(home, defaultDirectory, selectedRecovery);
+  if (!options.advanced && !selectedExists) requireEmptyTarget(defaultDirectory);
+  let mode: SetupMode;
+  let newRecovery = false;
+  let alternateWallet = false;
+  let continued: ManagedNanoChoice | undefined;
+  let recoveryMethod: 'create' | 'import' | undefined;
+  if (options.advanced) {
+    mode = await choice(options, 'Nano wallet: derive from your recovery phrase, reuse an existing wallet, or import a private seed file (create/reuse/import)', ['create', 'reuse', 'import'], selectedExists ? 'reuse' : 'create');
+  } else if (selectedExists) {
+    const selection = await sourceChoice(options, ['Continue selected wallet (default)', 'Create recovery phrase', 'Import recovery phrase'], prepared);
+    continued = prepared[Number(selection) - 4];
+    mode = selection === '1' || continued?.kind === 'wallet' ? 'reuse' : 'create';
+    if (mode === 'create' && !continued) {
+      recoveryMethod = selection === '2' ? 'create' : 'import';
+      newRecovery = true;
+      alternateWallet = true;
+    }
+  } else {
+    const hasRecovery = existsSync(join(selectedRecovery, 'state.sqlite'));
+    const selection = await sourceChoice(options, [hasRecovery ? 'Use selected recovery phrase (default)' : 'Create recovery phrase (default)', 'Import a recovery phrase'], prepared);
+    continued = prepared[Number(selection) - 3];
+    mode = continued?.kind === 'wallet' ? 'reuse' : 'create';
+    if (!continued) recoveryMethod = selection === '2' ? 'import' : hasRecovery ? undefined : 'create';
+  }
+  const directory = options.advanced ? privatePath(await answer(options, 'Private Nano wallet directory', defaultDirectory))
+    : continued?.kind === 'wallet' ? continued.directory
+    : alternateWallet || selectedExists && continued?.kind === 'recovery' ? unusedManagedDirectory(home, 'nano-new') : defaultDirectory;
+  if (mode === 'reuse') {
+    const config = loadConfiguration(directory);
+    assertConnection(options, config);
+    const originalPolicy = policyOf(config);
+    const replace = options.advanced ? await choice(options, 'Existing Nano policy: keep approved grants and limits, or replace transfer policy (keep/replace)', ['keep', 'replace'], 'keep') : 'keep';
+    const policy = options.advanced ? replace === 'replace' ? await policyQuestions(options, originalPolicy) : policyOf(config) : await basicPolicy(options, originalPolicy);
+    if (options.advanced && !policy.grants.controllerPurposes.includes('login')
+      && await yesNo(options, 'Add permission to sign Marketplace login proofs only (other purpose grants stay unchanged)', false)) policy.grants.controllerPurposes.push('login');
+    return existingPlan(options, directory, config, policy);
+  }
 
   requireEmptyTarget(directory);
-  const network = await choice(options, 'Nano network (nano:mainnet/nano:dev)', ['nano:mainnet', 'nano:dev'], 'nano:mainnet');
-  const rpcUrl = validateNanoRpcUrl(await answer(options, 'Nano RPC URL', defaultNanoRpcUrl(network)));
-  const selectedWorkUrl = await answer(options, 'Nano work URL (optional; Enter uses the Nano RPC)', '');
+  const network = options.advanced ? await choice(options, 'Nano network (nano:mainnet/nano:dev)', ['nano:mainnet', 'nano:dev'], 'nano:mainnet') : 'nano:mainnet';
+  const rpcUrl = options.advanced ? validateNanoRpcUrl(await answer(options, 'Nano RPC URL', defaultNanoRpcUrl(network))) : defaultNanoRpcUrl(network);
+  const selectedWorkUrl = options.advanced ? await answer(options, 'Nano work URL (optional; Enter uses the Nano RPC)', '') : '';
   const workUrl = selectedWorkUrl ? validateNanoRpcUrl(selectedWorkUrl) : undefined;
   const { origin, audience } = marketplaceConnection(options);
-  const index = derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1'));
+  const index = options.advanced ? derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1')) : 0;
   let seedFile: string | undefined;
-  let importedAddress: string | undefined;
+  let address: string;
+  let recoveryWalletDirectory: string | undefined;
+  let recovery: Awaited<ReturnType<typeof inspectNanoRecoveryWallet>> | undefined;
   if (mode === 'import') {
     seedFile = privatePath(await answer(options, 'Existing private 32-byte seed file (64 hexadecimal characters; never paste the seed)'));
     refuseManagedSeed(seedFile);
-    importedAddress = (await inspectNanoSeed(seedFile, index)).address;
+    address = (await inspectNanoSeed(seedFile, index)).address;
+  } else {
+    recoveryWalletDirectory = options.advanced
+      ? privatePath(await answer(options, 'Recovery wallet directory (existing Atto CLI or dedicated Marketplace wallet)', selectedRecovery))
+      : continued?.kind === 'recovery' ? continued.directory
+      : privatePath(newRecovery || recoveryMethod === 'import' && existsSync(join(selectedRecovery, 'state.sqlite')) ? unusedManagedDirectory(home, 'nano-recovery') : selectedRecovery);
+    if (!continued && (newRecovery || recoveryMethod === 'import' && recoveryWalletDirectory !== selectedRecovery)) requireEmptyTarget(recoveryWalletDirectory);
+    if (index > 0x7fffffff) throw failure('SETUP_USAGE', 'Shared recovery uses hardened indexes from 0 through 2147483647.');
+    if (!existsSync(join(recoveryWalletDirectory, 'state.sqlite'))) {
+      await initializeMarketplaceRecoveryWallet(recoveryWalletDirectory, recoveryMethod ? { method: recoveryMethod } : undefined);
+    }
+    recovery = await inspectNanoRecoveryWallet(recoveryWalletDirectory, index);
+    address = recovery.address;
   }
-  const recoveryWalletDirectory = mode === 'create'
-    ? privatePath(await answer(options, 'Recovery wallet directory (existing Atto CLI or dedicated Marketplace wallet)',
-      options.env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR ?? join(home, 'wallets', 'atto'))) : undefined;
-  if (recoveryWalletDirectory && index > 0x7fffffff) throw failure('SETUP_USAGE', 'Shared recovery uses hardened indexes from 0 through 2147483647.');
-  const previousAttoDirectory = readWalletSelection(home)?.attoDirectory ?? options.env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR;
-  const selectedAttoDirectory = previousAttoDirectory && existsSync(join(previousAttoDirectory,'state.sqlite')) ? previousAttoDirectory : undefined;
-  const recovery = recoveryWalletDirectory ? await inspectExistingRecoveryWallet(recoveryWalletDirectory, index) : undefined;
-  const policy = await policyQuestions(options);
-  if (await yesNo(options, 'Allow headless Marketplace login proofs (terminal approvals are separate)', false)) policy.grants.controllerPurposes.push('login');
-  const seedDescription = seedFile
-    ? `Existing private seed file: ${seedFile}`
-    : `Recovery phrase: OS password store for ${recoveryWalletDirectory}; Nano derivation m/44'/165'/${index}'. No separate seed file.`;
-  await approve(options, review({ mode, directory, address: importedAddress ?? recovery?.address, network, rpcUrl, workUrl, origin, audience,
-    index, policy, seedDescription }));
-
-  // Recheck after consent: imported seed disappearance must never create a new identity.
-  requireEmptyTarget(directory);
-  if (seedFile) {
-    refuseManagedSeed(seedFile);
-    if ((await inspectNanoSeed(seedFile, index)).address !== importedAddress) throw failure('WALLET_KEY_MISMATCH', 'The selected private Nano seed changed during review.');
-  }
-  let expectedAddress = importedAddress;
-  if (recoveryWalletDirectory) {
-    if (!recovery) await initializeMarketplaceRecoveryWallet(recoveryWalletDirectory);
-    const current = await inspectNanoRecoveryWallet(recoveryWalletDirectory, index);
-    if (recovery && JSON.stringify(current) !== JSON.stringify(recovery)) throw failure('WALLET_KEY_MISMATCH', 'The recovery wallet changed during review.');
-    expectedAddress = current.address;
-  }
-  const result = await provisionNanoWallet({ dataDir: directory, derivationIndex: index, network, rpcUrl, ...(workUrl ? { workUrl } : {}), origin, audience,
-    ...(seedFile ? { seedFile, expectedAddress: importedAddress! } : {}),
-    ...(recoveryWalletDirectory ? { recoveryWalletDirectory, expectedAddress: expectedAddress! } : {}), ...policy, terminalConfirmed: true });
-  if (recoveryWalletDirectory) await saveWalletSelection(home, { attoDirectory: selectedAttoDirectory ?? recoveryWalletDirectory });
-  return { directory, address: result.address, index: result.index, network: result.network };
+  const policy = options.advanced ? await policyQuestions(options) : await basicPolicy(options);
+  if (options.advanced && await yesNo(options, 'Allow headless Marketplace login proofs (terminal approvals are separate)', false)) policy.grants.controllerPurposes.push('login');
+  const config = validateConfiguration({ version: 1, keySource: seedFile
+    ? { type: 'native-seed', seedFile, derivationVersion: 'nano-seed-blake2b-v1' }
+    : { type: 'shared-recovery', recoverySource: recovery!.recoverySource, derivationVersion: 'bip39-ed25519-slip10-nano-v1' },
+    derivationIndex: index, sourceAddress: address, network, rpcUrl, ...(workUrl ? { workUrl } : {}), origin, audience, ...policy });
+  return newPlan(options, directory, config, mode);
 }
 
-async function inspectExistingRecoveryWallet(directory: string, index: number) {
-  try { lstatSync(join(directory, 'state.sqlite')); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
+type ManagedNanoChoice = {kind:'wallet'|'recovery';directory:string};
+
+function managedNanoChoices(home: string, selectedWallet: string, selectedRecovery: string): ManagedNanoChoice[] {
+  const root = join(home, 'wallets');
+  if (!existsSync(root)) return [];
+  const state = lstatSync(root);
+  if (!state.isDirectory() || state.isSymbolicLink()) throw failure('PRIVATE_FILE', 'Use a private owner-only wallet directory.');
+  assertPrivatePermissions(root, 'directory');
+  const choices: ManagedNanoChoice[] = [];
+  for (const entry of readdirSync(root, {withFileTypes:true}).sort((left,right)=>left.name.localeCompare(right.name))) {
+    if (!entry.isDirectory()) continue;
+    const directory = join(root, entry.name);
+    if (/^nano(?:-new(?:-[1-9][0-9]*)?)?$/.test(entry.name) && directory !== selectedWallet && hasProfile(directory)) {
+      choices.push({kind:'wallet',directory});
+    } else if (/^nano-recovery(?:-[1-9][0-9]*)?$/.test(entry.name) && directory !== selectedRecovery && existsSync(join(directory, 'state.sqlite'))) {
+      // An account claim belongs to its original wallet and journal. Only
+      // recovery created before Nano provisioning can resume as a new target.
+      const claims = join(directory, 'marketplace-nano-wallets');
+      if (!existsSync(claims) || readdirSync(claims).length === 0) choices.push({kind:'recovery',directory});
+    }
   }
-  return inspectNanoRecoveryWallet(directory, index);
+  return choices;
 }
 
-async function reuseWallet(options: NanoInteractiveSetupOptions, directory: string): Promise<NanoInteractiveSetupResult> {
-  const config = await inspectNanoWallet(directory);
+async function sourceChoice(options: NanoInteractiveSetupOptions, primary: string[], prepared: ManagedNanoChoice[]): Promise<string> {
+  const labels = [...primary, ...prepared.map(item => `${item.kind === 'wallet' ? 'Continue existing managed wallet' : 'Continue prepared recovery'} at ${terminalText(item.directory)}`)];
+  const choices = labels.map((_,index)=>String(index+1));
+  return menuChoice(options.prompt, `Nano wallet: ${labels.map((label,index)=>`[${index+1}] ${label}`).join(', ')}: `, choices, '1');
+}
+
+function unusedManagedDirectory(home: string, name: 'nano-new'|'nano-recovery'): string {
+  for (let number=1;;number++) {
+    const directory = join(home, 'wallets', `${name}${number===1?'':`-${number}`}`);
+    try { lstatSync(directory); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return directory;
+      throw error;
+    }
+  }
+}
+
+function policyOf(config: NanoWalletConfiguration): Policy {
+  return { grants: { ...config.grants, controllerPurposes: [...config.grants.controllerPurposes] }, limits: { ...config.limits } };
+}
+function assertConnection(options: NanoInteractiveSetupOptions, config: NanoWalletConfiguration): void {
   if ((options.origin !== undefined && marketplaceOrigin(options.origin) !== config.origin)
     || (options.audience !== undefined && audienceText(options.audience) !== config.audience)) {
-    throw failure('WALLET_CONFIGURATION', 'This Nano profile is pinned to a different Marketplace origin or audience. Reuse its exact existing connection settings.');
+    throw failure('WALLET_CONFIGURATION', 'This Nano wallet is pinned to a different Marketplace origin or audience. Reuse its exact existing connection settings.');
   }
-  const replace = await choice(options, 'Existing Nano policy: keep approved grants and limits, or replace transfer policy (keep/replace)', ['keep', 'replace'], 'keep');
-  const originalPolicy = { grants: { ...config.grants, controllerPurposes: [...config.grants.controllerPurposes] }, limits: { ...config.limits } };
-  const policy = replace === 'replace' ? await policyQuestions(options, originalPolicy)
-    : { grants: { ...originalPolicy.grants, controllerPurposes: [...originalPolicy.grants.controllerPurposes] }, limits: { ...originalPolicy.limits } };
-  if (!policy.grants.controllerPurposes.includes('login')
-    && await yesNo(options, 'Add permission to sign Marketplace login proofs only (other purpose grants stay unchanged)', false)) {
-    policy.grants.controllerPurposes.push('login');
-  }
-  await approve(options, review({ mode: 'reuse', directory, address: config.sourceAddress, network: config.network,
-    rpcUrl: config.rpcUrl, workUrl: config.workUrl, origin: config.origin, audience: config.audience, index: config.derivationIndex,
-    policy, seedDescription: config.keySource.type === 'shared-recovery' ? `Recovery phrase: OS password store for ${config.keySource.recoverySource.directory}; ${config.keySource.derivationVersion}` : `Existing private seed file: ${config.keySource.seedFile}` }));
-
-  const current = await inspectNanoWallet(directory);
-  if (JSON.stringify(current) !== JSON.stringify(config)) throw failure('WALLET_CONFIGURATION_CHANGED', 'The Nano profile changed during review. Repeat setup against its current settings.');
-  if (JSON.stringify(policy) !== JSON.stringify(originalPolicy)) {
-    await approveNanoWalletPolicy({ dataDir: directory, ...policy, terminalConfirmed: true });
-  }
+}
+function planReview(options: NanoInteractiveSetupOptions, directory: string, config: NanoWalletConfiguration, mode: SetupMode, policy: Policy, originalPolicy?: Policy): string {
+  const source = config.keySource;
+  return review({ mode, directory, address: config.sourceAddress, network: config.network, rpcUrl: config.rpcUrl, workUrl: config.workUrl,
+    origin: config.origin, audience: config.audience, index: config.derivationIndex, policy, ...(originalPolicy ? { originalPolicy } : {}),
+    detailed: Boolean(options.advanced || options.json),
+    sourceDescription: source.type === 'shared-recovery' ? `Recovery source: ${source.recoverySource.directory} (OS password store)` : `Seed file: ${source.seedFile}`,
+    seedDescription: source.type === 'shared-recovery' ? `Recovery phrase: OS password store for ${source.recoverySource.directory}; ${source.derivationVersion}` : `Existing private seed file: ${source.seedFile}` });
+}
+function accessMode(policy: Policy): WalletAccessMode {
+  return !policy.grants.externalTransfers ? 'login-only' : policy.limits.maxPaymentAtomic === null ? 'unlimited' : 'limited';
+}
+function identity(directory: string, config: NanoWalletConfiguration): NanoInteractiveSetupResult {
   return { directory, address: config.sourceAddress, index: config.derivationIndex, network: config.network };
+}
+function existingPlan(options: NanoInteractiveSetupOptions, directory: string, config: NanoWalletConfiguration, policy: Policy): DeferredWalletPlan {
+  validateConfiguration({ ...config, ...policy });
+  const wallet = identity(directory, config);
+  let expected = config;
+  let committed = false;
+  const validate = async () => {
+    requireTerminal();
+    if (!isDeepStrictEqual(loadConfiguration(directory), expected)) throw failure('WALLET_CONFIGURATION_CHANGED', 'The Nano wallet changed during review. Repeat setup against its current settings.');
+  };
+  return { asset: 'XNO', wallet, mode: accessMode(policy), review: planReview(options, directory, config, 'reuse', policy, policyOf(config)),
+    intent: structuredClone({ version: 1, directory, configuration: config, policy }), validate,
+    commit: async () => {
+      await validate();
+      if (committed) return identity(directory, config);
+      if (JSON.stringify(policy) !== JSON.stringify(policyOf(config))) await approveNanoWalletPolicy({ dataDir: directory, ...policy, expectedConfiguration: config, terminalConfirmed: true });
+      expected = { ...config, ...policy };
+      committed = true;
+      await validate();
+      return identity(directory, config);
+    } };
+}
+function newPlan(options: NanoInteractiveSetupOptions, directory: string, config: NanoWalletConfiguration, mode: SetupMode): DeferredWalletPlan {
+  const wallet = identity(directory, config);
+  let committed: NanoWalletConfiguration | undefined;
+  const validate = async () => {
+    requireTerminal();
+    if (committed) {
+      if (!isDeepStrictEqual(loadConfiguration(directory), committed)) throw failure('WALLET_CONFIGURATION_CHANGED', 'The Nano wallet changed after its approved setup.');
+      return;
+    }
+    requireEmptyTarget(directory);
+    if (config.keySource.type === 'native-seed') {
+      refuseManagedSeed(config.keySource.seedFile);
+      if ((await inspectNanoSeed(config.keySource.seedFile, config.derivationIndex)).address !== config.sourceAddress) throw failure('WALLET_KEY_MISMATCH', 'The selected private Nano seed changed during review.');
+    } else {
+      const current = await inspectNanoRecoveryWallet(config.keySource.recoverySource.directory, config.derivationIndex);
+      if (current.address !== config.sourceAddress || JSON.stringify(current.recoverySource) !== JSON.stringify(config.keySource.recoverySource)) throw failure('WALLET_KEY_MISMATCH', 'The recovery wallet changed during review.');
+    }
+  };
+  return { asset: 'XNO', wallet, mode: accessMode(config), review: planReview(options, directory, config, mode, config),
+    intent: structuredClone({ version: 1, directory, configuration: config, policy: policyOf(config) }), validate,
+    commit: async () => {
+      await validate();
+      if (committed) return identity(directory, config);
+      const source = config.keySource;
+      await provisionNanoWallet({ dataDir: directory, derivationIndex: config.derivationIndex, network: config.network, rpcUrl: config.rpcUrl,
+        ...(config.workUrl ? { workUrl: config.workUrl } : {}), origin: config.origin, audience: config.audience, ...policyOf(config), expectedAddress: config.sourceAddress,
+        ...(source.type === 'native-seed' ? { seedFile: source.seedFile } : { recoveryWalletDirectory: source.recoverySource.directory }), terminalConfirmed: true });
+      committed = config;
+      await validate();
+      return identity(directory, config);
+    } };
+}
+function resumePlan(options: NanoInteractiveSetupOptions, intent: Record<string, unknown>): DeferredWalletPlan {
+  if (Object.keys(intent).sort().join(',') !== 'configuration,directory,policy,version' || intent.version !== 1 || typeof intent.directory !== 'string') throw failure('WALLET_CONFIGURATION', 'The saved Nano setup plan is invalid.');
+  const directory = privatePath(intent.directory), config = validateConfiguration(structuredClone(intent.configuration));
+  assertConnection(options, config);
+  if (!intent.policy || typeof intent.policy !== 'object' || Array.isArray(intent.policy) || Object.keys(intent.policy).sort().join(',') !== 'grants,limits') throw failure('WALLET_CONFIGURATION', 'The saved Nano setup policy is invalid.');
+  const desired = validateConfiguration({ ...config, ...structuredClone(intent.policy) });
+  if (hasProfile(directory)) {
+    const current = loadConfiguration(directory);
+    if (!isDeepStrictEqual({ ...current, grants: null, limits: null }, { ...config, grants: null, limits: null })) throw failure('WALLET_CONFIGURATION_CHANGED', 'The saved Nano setup refers to a different wallet or connection.');
+    const policy = policyOf(desired);
+    if (isDeepStrictEqual(config.grants.controllerPurposes, desired.grants.controllerPurposes)) policy.grants.controllerPurposes = [...current.grants.controllerPurposes];
+    return existingPlan(options, directory, current, policy);
+  }
+  return newPlan(options, directory, desired, config.keySource.type === 'native-seed' ? 'import' : 'create');
 }
 
 async function policyQuestions(options: NanoInteractiveSetupOptions, current?: Policy): Promise<Policy> {
   const externalTransfers = await yesNo(options, 'Allow external Nano transfers from this wallet', current?.grants.externalTransfers ?? false);
-  let maxPaymentAtomic = current?.limits.maxPaymentAtomic ?? '0';
-  let rolling24hAtomic = current?.limits.rolling24hAtomic ?? '0';
+  let maxPaymentAtomic = current ? current.limits.maxPaymentAtomic : '0';
+  let rolling24hAtomic = current ? current.limits.rolling24hAtomic : '0';
   if (externalTransfers) {
-    maxPaymentAtomic = xnoToRaw(await answer(options, 'Maximum XNO per payment (up to 30 decimal places)', maxPaymentAtomic === '0' ? '1' : rawToXno(maxPaymentAtomic)));
-    rolling24hAtomic = xnoToRaw(await answer(options, 'Maximum XNO over rolling 24 hours (all native sends)', rolling24hAtomic === '0' ? '10' : rawToXno(rolling24hAtomic)));
-    if (BigInt(maxPaymentAtomic) > BigInt(rolling24hAtomic)) throw failure('INVALID_AMOUNT', 'The per-payment ceiling must not exceed the rolling 24-hour ceiling.');
+    maxPaymentAtomic = xnoToRaw(await answer(options, 'Maximum XNO per payment (up to 30 decimal places)', maxPaymentAtomic === null || maxPaymentAtomic === '0' ? '1' : rawToXno(maxPaymentAtomic)));
+    rolling24hAtomic = xnoToRaw(await answer(options, 'Maximum XNO over rolling 24 hours (all native sends)', rolling24hAtomic === null || rolling24hAtomic === '0' ? '10' : rawToXno(rolling24hAtomic)));
+    if (maxPaymentAtomic !== null && rolling24hAtomic !== null && BigInt(maxPaymentAtomic) > BigInt(rolling24hAtomic)) throw failure('INVALID_AMOUNT', 'The per-payment ceiling must not exceed the rolling 24-hour ceiling.');
   }
   return { grants: { externalTransfers, controllerPurposes: [...(current?.grants.controllerPurposes ?? [])] },
     limits: { maxPaymentAtomic, rolling24hAtomic } };
 }
 
-function review(input: {
+async function basicPolicy(options: NanoInteractiveSetupOptions, current?: Policy): Promise<Policy> {
+  const saved = current ? accessMode(current) : 'login-only';
+  const fallback = saved === 'login-only' ? '1' : saved === 'limited' ? '2' : '3';
+  const selection = await menuChoice(options.prompt,
+    `Nano access: [1] Login only${fallback === '1' ? ' (default)' : ''}, [2] Limited spending${fallback === '2' ? ' (default)' : ''}, [3] Unlimited spending${fallback === '3' ? ' (default)' : ''}: `,
+    ['1', '2', '3'], fallback);
+  const limits: NanoWalletConfiguration['limits'] = current ? { ...current.limits } : { maxPaymentAtomic: '0', rolling24hAtomic: '0' };
+  if (selection === '3') {
+    limits.maxPaymentAtomic = null;
+    limits.rolling24hAtomic = null;
+  } else if (selection === '2' && (limits.maxPaymentAtomic === null || limits.rolling24hAtomic === null
+    || !current?.grants.externalTransfers && (BigInt(limits.maxPaymentAtomic) === 0n || BigInt(limits.rolling24hAtomic) === 0n))) {
+    limits.maxPaymentAtomic = await basicPaymentCap(options, 'Maximum XNO per payment (up to 30 decimal places)', '1');
+    limits.rolling24hAtomic = await basicPaymentCap(options, 'Maximum XNO over rolling 24 hours (all native sends)', '10', limits.maxPaymentAtomic);
+  }
+  return { grants: { externalTransfers: selection !== '1', controllerPurposes: [...(current?.grants.controllerPurposes ?? [])] }, limits };
+}
+
+/** Correct only basic cap input; terminal and wallet failures retain their original boundary. */
+async function basicPaymentCap(options:NanoInteractiveSetupOptions,question:string,fallback:string,minimumRaw?:string):Promise<string> {
+  for(;;){
+    const value=await answer(options,question,fallback);
+    let raw:string;
+    try{
+      raw=xnoToRaw(value);
+      if(BigInt(raw)===0n)throw failure('INVALID_AMOUNT','Limited Nano spending requires a positive payment cap.');
+    }catch(error){
+      if(!(error instanceof ProfileError)||error.code!=='INVALID_AMOUNT')throw error;
+      process.stderr.write('Enter an XNO amount greater than zero, with up to 30 decimal places and within the Nano range.\n');
+      continue;
+    }
+    if(minimumRaw!==undefined&&BigInt(raw)<BigInt(minimumRaw)){
+      process.stderr.write(`The rolling 24-hour maximum must be at least the per-payment limit of ${rawToXno(minimumRaw)} XNO.\n`);
+      continue;
+    }
+    return raw;
+  }
+}
+
+type ReviewInput = {
   mode: SetupMode; directory: string; address: string | undefined; network: NanoNetwork; rpcUrl: string; workUrl: string | undefined;
-  origin: string; audience: string; index: number; policy: Policy; seedDescription: string;
-}): string {
+  origin: string; audience: string; index: number; policy: Policy; originalPolicy?: Policy;
+  sourceDescription: string; seedDescription: string; detailed: boolean;
+};
+
+function accessDescription(policy: Policy): string {
+  if (!policy.grants.externalTransfers) return 'Login only (payments disabled)';
+  if (policy.limits.maxPaymentAtomic === null) return 'Unlimited spending (can spend available balance and future deposits)';
+  return BigInt(policy.limits.maxPaymentAtomic) > 0n && BigInt(policy.limits.rolling24hAtomic!) > 0n
+    ? 'Limited spending (payments enabled within limits)' : 'Limited spending (zero limits block payments)';
+}
+
+function capDescription(value: string | null, detailed: boolean): string {
+  return value === null ? 'Unlimited' : `${rawToXno(value)} XNO${detailed ? ` (${value} raw)` : ''}`;
+}
+
+function changedLine(label: string, current: string | undefined, requested: string): string {
+  return `${label}: ${current !== undefined && current !== requested ? `${terminalText(current)} → ` : ''}${terminalText(requested)}`;
+}
+
+function review(input: ReviewInput): string {
+  const action = input.mode === 'reuse' ? 'Continue existing Nano wallet and journal'
+    : input.mode === 'import' ? 'Import existing private seed into a new Nano wallet' : 'Derive Nano wallet from shared recovery phrase';
+  const original = input.originalPolicy;
+  if (!input.detailed) {
+    const lines = [
+      'Review Nano wallet setup:',
+      `Action: ${action}`,
+      `Wallet directory: ${terminalText(input.directory)}`,
+      terminalText(input.sourceDescription),
+      `Address: ${terminalText(input.address ?? 'New public address will be derived after approval')}`,
+      `Network: ${terminalText(input.network)}`,
+      changedLine('Access', original && accessDescription(original), accessDescription(input.policy)),
+      changedLine('Maximum per payment', original && capDescription(original.limits.maxPaymentAtomic, false), capDescription(input.policy.limits.maxPaymentAtomic, false)),
+      changedLine('Rolling 24-hour maximum', original && capDescription(original.limits.rolling24hAtomic, false), capDescription(input.policy.limits.rolling24hAtomic, false)),
+    ];
+    const currentPurposes = original?.grants.controllerPurposes.join(', ') || 'none';
+    const requestedPurposes = input.policy.grants.controllerPurposes.join(', ') || 'none';
+    if (original && currentPurposes !== requestedPurposes) lines.push(changedLine('Controller purposes', currentPurposes, requestedPurposes));
+    return [...lines, 'Keep your recovery phrase, wallet configuration and journals backed up securely.'].join('\n');
+  }
   return [
     'Review Nano wallet setup:',
-    `Action: ${input.mode === 'reuse' ? 'Reuse existing keys and journal' : input.mode === 'import' ? 'Import existing private seed into a new profile' : 'Derive Nano wallet from shared recovery phrase'}`,
-    `Wallet directory: ${input.directory}`,
-    `Address: ${input.address ?? 'New public address will be derived after approval'}`,
-    `Derivation index: ${input.index}`,
-    `Network: ${input.network}`,
-    `RPC: ${input.rpcUrl}`,
-    `Work: ${input.workUrl ?? input.rpcUrl}`,
-    `Marketplace origin: ${input.origin}`,
-    `Audience: ${input.audience}`,
-    `External transfers: ${input.policy.grants.externalTransfers ? 'allowed' : 'denied'}`,
-    `Controller purposes: ${input.policy.grants.controllerPurposes.join(', ') || 'none'}`,
-    `Maximum per payment: ${rawToXno(input.policy.limits.maxPaymentAtomic)} XNO (${input.policy.limits.maxPaymentAtomic} raw)`,
-    `Rolling 24-hour maximum: ${rawToXno(input.policy.limits.rolling24hAtomic)} XNO (${input.policy.limits.rolling24hAtomic} raw)`,
-    input.seedDescription,
+    `Action: ${terminalText(action)}`,
+    changedLine('Access', original && accessDescription(original), accessDescription(input.policy)),
+    `Wallet directory: ${terminalText(input.directory)}`,
+    `Address: ${terminalText(input.address ?? 'New public address will be derived after approval')}`,
+    `Derivation index: ${terminalText(input.index)}`,
+    `Network: ${terminalText(input.network)}`,
+    `RPC: ${terminalText(input.rpcUrl)}`,
+    `Work: ${terminalText(input.workUrl ?? input.rpcUrl)}`,
+    `Marketplace origin: ${terminalText(input.origin)}`,
+    `Audience: ${terminalText(input.audience)}`,
+    changedLine('External transfers', original && (original.grants.externalTransfers ? 'allowed' : 'denied'), input.policy.grants.externalTransfers ? 'allowed' : 'denied'),
+    changedLine('Controller purposes', original && (original.grants.controllerPurposes.join(', ') || 'none'), input.policy.grants.controllerPurposes.join(', ') || 'none'),
+    changedLine('Maximum per payment', original && capDescription(original.limits.maxPaymentAtomic, true), capDescription(input.policy.limits.maxPaymentAtomic, true)),
+    changedLine('Rolling 24-hour maximum', original && capDescription(original.limits.rolling24hAtomic, true), capDescription(input.policy.limits.rolling24hAtomic, true)),
+    terminalText(input.seedDescription),
     'Keep your recovery phrase, wallet configuration and journals backed up securely.',
-    'Type APPROVE to confirm: ',
   ].join('\n');
 }
 
@@ -175,23 +399,27 @@ async function approve(options: NanoInteractiveSetupOptions, preview: string): P
 }
 
 async function answer(options: NanoInteractiveSetupOptions, question: string, fallback?: string): Promise<string> {
-  const value = (await options.prompt(`${question}${fallback ? ` [${fallback}]` : ''}: `)).trim();
+  const value = (await options.prompt(`${question}${fallback ? ` [${terminalText(fallback)}]` : ''}: `)).trim();
   if (/\x00|\r|\n/.test(value) || value.length > 4096) throw failure('SETUP_USAGE', 'Use one bounded line for each setup answer.');
   if (!value && fallback === undefined) throw failure('SETUP_USAGE', 'A required Nano setup answer was empty.');
   return value || fallback!;
 }
 
 async function choice<T extends string>(options: NanoInteractiveSetupOptions, question: string, choices: readonly T[], fallback: T): Promise<T> {
-  const value = await answer(options, question, fallback);
-  if (!choices.includes(value as T)) throw failure('SETUP_USAGE', `Choose ${choices.join(', ')}.`);
-  return value as T;
+  while (true) {
+    const value = await answer(options, question, fallback);
+    if (choices.includes(value as T)) return value as T;
+    process.stderr.write(`Choose ${choices.join(', ')}.\n`);
+  }
 }
 
 async function yesNo(options: NanoInteractiveSetupOptions, question: string, fallback: boolean): Promise<boolean> {
-  const value = (await answer(options, `${question} (yes/no)`, fallback ? 'yes' : 'no')).toLowerCase();
-  if (value === 'yes' || value === 'y') return true;
-  if (value === 'no' || value === 'n') return false;
-  throw failure('SETUP_USAGE', 'Answer yes or no.');
+  while (true) {
+    const value = (await answer(options, `${question} (yes/no)`, fallback ? 'yes' : 'no')).toLowerCase();
+    if (value === 'yes' || value === 'y') return true;
+    if (value === 'no' || value === 'n') return false;
+    process.stderr.write('Answer yes or no.\n');
+  }
 }
 
 function xnoToRaw(value: string): string {
@@ -257,7 +485,7 @@ function hasProfile(directory: string): boolean {
 function requireEmptyTarget(directory: string): void {
   try {
     const st = lstatSync(directory);
-    if (!st.isDirectory() || st.isSymbolicLink() || readdirSync(directory).length) throw failure('WALLET_CONFIGURATION_EXISTS', 'The target Nano directory already contains state. Reuse its existing private adapter profile.');
+    if (!st.isDirectory() || st.isSymbolicLink() || readdirSync(directory).length) throw failure('WALLET_CONFIGURATION_EXISTS', 'The target Nano directory already contains state. Select its existing Nano wallet or use an empty directory.');
     try { assertPrivatePermissions(directory, 'directory'); }
     catch { throw failure('PRIVATE_FILE', 'Use a private owner-only Nano wallet directory.'); }
   } catch (error) {
@@ -270,7 +498,7 @@ function refuseManagedSeed(seedFile: string): void {
   while (directory !== parse(directory).root) {
     try {
       lstatSync(join(directory, 'wallet.json'));
-      throw failure('WALLET_CONFIGURATION_EXISTS', `This seed is beside an existing adapter profile. Choose reuse with ${directory} so its keys and journal remain together.`);
+      throw failure('WALLET_CONFIGURATION_EXISTS', `This seed is beside an existing Nano wallet. Select ${directory} so its keys and journal remain together.`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }

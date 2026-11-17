@@ -103,9 +103,12 @@ export class NanoWallet {
         this.refreshPolicy();
         if (!this.configuration.grants.externalTransfers)
             fail('PERMISSION_DENIED');
-        if (amount > positiveRaw(this.configuration.limits.maxPaymentAtomic, true))
+        if (this.configuration.limits.maxPaymentAtomic !== null && amount > positiveRaw(this.configuration.limits.maxPaymentAtomic, true))
             fail('SPEND_LIMIT');
-        this.journal.checkLimit(this.configuration.sourceAddress, this.configuration.network, this.now(), positiveRaw(this.configuration.limits.rolling24hAtomic, true));
+        this.journal.checkLimit(this.configuration.sourceAddress, this.configuration.network, this.now(), this.rollingLimit());
+    }
+    private rollingLimit(): bigint | null {
+        return this.configuration.limits.rolling24hAtomic === null ? null : positiveRaw(this.configuration.limits.rolling24hAtomic, true);
     }
     private requireReceiveAuthority(): void {
         this.refreshPolicy();
@@ -272,11 +275,11 @@ export class NanoWallet {
         }
         if (!this.configuration.grants.externalTransfers)
             fail('PERMISSION_DENIED', 'External Nano transfers require their own local terminal grant.');
-        if (amount > positiveRaw(this.configuration.limits.maxPaymentAtomic, true))
+        if (this.configuration.limits.maxPaymentAtomic !== null && amount > positiveRaw(this.configuration.limits.maxPaymentAtomic, true))
             fail('SPEND_LIMIT');
         await withPrivateKey(this.configuration, () => undefined);
         await this.rpc.requirePinnedNetwork();
-        const reservation = this.journal.begin(input, this.now(), positiveRaw(this.configuration.limits.rolling24hAtomic, true));
+        const reservation = this.journal.begin(input, this.now(), this.rollingLimit());
         if (reservation.state !== 'PREPARING')
             return relay ? this.relayResult(reservation) : await this.publishNative(reservation, true);
         let durable = false;
@@ -402,7 +405,7 @@ export class NanoWallet {
         if (!await this.rpc.receivableExists(hash))
             fail('FUNDING_NOT_RECEIVABLE');
         const terms = { network: this.configuration.network, hash, amountAtomic: String(amount) };
-        const reservation = this.journal.begin({ id, kind: 'receive', digest: sha256(canonical(terms)), requestJson: canonical(terms), uniqueId: id, source: this.configuration.sourceAddress, network: this.configuration.network, amount: '0', destination: hash }, this.now(), positiveRaw(this.configuration.limits.rolling24hAtomic, true));
+        const reservation = this.journal.begin({ id, kind: 'receive', digest: sha256(canonical(terms)), requestJson: canonical(terms), uniqueId: id, source: this.configuration.sourceAddress, network: this.configuration.network, amount: '0', destination: hash }, this.now(), this.rollingLimit());
         if (reservation.state !== 'PREPARING') {
             const result = await this.publishNative(reservation, true);
             return { ...result, amountAtomic: String(amount), replayed: true };

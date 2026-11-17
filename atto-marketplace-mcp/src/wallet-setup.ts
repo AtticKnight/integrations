@@ -1,3 +1,4 @@
+import { takeJsonFlag, terminalFields, writeTerminalResult } from './terminal-output.js';
 import { defaultMarketplaceHome } from './defaults.js';
 import { runNanoTerminal, nanoWalletUsage } from './nano-terminal.js';
 import {existsSync} from 'node:fs';
@@ -11,14 +12,16 @@ const usage = 'Usage: atto-marketplace-mcp wallet setup [--asset ATTO] [--home <
 
 /** Wallet recovery and approvals execute only in a person's local terminal. */
 export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  const selected=takeJsonFlag(argv); argv=selected.argv;
+  const outputArgs=selected.json?[...argv,"--json"]:argv;
   if(argv[0]==='setup'&&!argv.includes('--help')&&!argv.includes('-h')&&(argv.includes('--interactive')||(!argv.includes('--network')&&!argv.includes('--rpc-url')))) {
     const {runWalletWizard}=await import('./guided-setup.js');
-    await runWalletWizard(argv.slice(1),env);return;
+    await runWalletWizard(outputArgs.slice(1),env);return;
   }
   if(!['setup','status','policy'].includes(argv[0]??''))throw new ProfileError('SETUP_USAGE',usage.trim());
   if (argv.includes('--help') || argv.includes('-h')) { process.stdout.write(usage+nanoWalletUsage); return; }
-  if((argv[0]==='status'||argv[0]==='policy')&&argv.includes('ATTO')) {await runAttoWalletAccessCommand(argv,env);return;}
-  if(argv[0]==='status'||argv[0]==='policy'||argv.includes('XNO')) {await runNanoTerminal(argv,env);return;}
+  if((argv[0]==='status'||argv[0]==='policy')&&argv.includes('ATTO')) {await runAttoWalletAccessCommand(outputArgs,env);return;}
+  if(argv[0]==='status'||argv[0]==='policy'||argv.includes('XNO')) {await runNanoTerminal(outputArgs,env);return;}
   if (!process.stdin.isTTY || !process.stderr.isTTY) {
     throw new ProfileError('TERMINAL_REQUIRED', 'Marketplace wallet setup requires an interactive local terminal.');
   }
@@ -49,7 +52,7 @@ export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Pr
   const directory = walletEnv.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR!;
   ensurePrivateDirectory(home);
   ensurePrivateDirectory(directory);
-  process.stderr.write(`Marketplace MCP Atto wallet: ${directory}\nNative network: ${network}\nNode: ${nodeUrl}\nWork server: ${workerUrl}\n`);
+  process.stderr.write(`${terminalFields({walletDirectory:directory,network,nodeUrl,workerUrl})}\n`);
   const { setupMarketplaceWallet } = await import('@attocash/cli/terminal');
   let reuseExisting=false;
   if(existsSync(join(directory,'state.sqlite'))){
@@ -60,9 +63,9 @@ export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Pr
   }
   const wallet=await setupMarketplaceWallet({directory,controllerIndex:Number(indexText),reuseExisting,typedControllerApprovals:true,
     configuration:{network:network.slice(5).toUpperCase() as 'LIVE'|'BETA'|'DEV'|'LOCAL',nodeUrl,workerUrl}});
-  await approveAttoWalletAccess({home,directory,index:wallet.index});
-  process.stdout.write(`${JSON.stringify({status:'wallet-configured', ...wallet, network,
-    next:'Use this public controller address for Marketplace login or explicitly link it to your existing Marketplace account. Configure only atto-marketplace-mcp in your client.'})}\n`);
+  await approveAttoWalletAccess({home,directory,index:wallet.index,json:selected.json});
+  writeTerminalResult({status:'wallet-configured', ...wallet, network,
+    next:'Use this public controller address for Marketplace login or explicitly link it to your existing Marketplace account. Configure only atto-marketplace-mcp in your client.'},selected.json);
 }
 
 function publicUrl(value: string | undefined): string {
