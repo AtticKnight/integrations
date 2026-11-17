@@ -5,12 +5,14 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'n
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { inspectNanoSeed, provisionNanoWallet, verifyNanoMessage } from '@attocash/atto-marketplace-nano-adapter';
 
 const execute=promisify(execFile);
 const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(import.meta.dirname,'..');
+const cliDirectory=process.env.ATTO_TEST_CLI_PACKAGE_DIR??fileURLToPath(new URL('../',import.meta.resolve('@attocash/cli/core')));
+const cliModuleUrl=name=>pathToFileURL(join(cliDirectory,'dist',name)).href;
 const main=join(packageDirectory,'dist/main.js');
 const moduleUrl=name=>pathToFileURL(join(packageDirectory,'dist',name)).href;
 const {MarketplaceProfileStore}=await import(moduleUrl('profile-store.js'));
@@ -298,8 +300,8 @@ for (const method of ['create','import']) test(`Nano ${method} recovery survives
     import assert from 'node:assert/strict';
     import {appendFileSync,existsSync,readFileSync,writeFileSync} from 'node:fs';
     import {join} from 'node:path';
-    import {AttoApplication} from ${JSON.stringify(new URL('../../atto-cli/dist/application/app.js',import.meta.url).href)};
-    import {OsSecretStore} from ${JSON.stringify(new URL('../../atto-cli/dist/storage/secrets.js',import.meta.url).href)};
+    import {AttoApplication} from ${JSON.stringify(cliModuleUrl('application/app.js'))};
+    import {OsSecretStore} from ${JSON.stringify(cliModuleUrl('storage/secrets.js'))};
     import {prepareNanoWalletInteractive,setupNanoWalletInteractive} from ${JSON.stringify(moduleUrl('nano-setup.js'))};
     import {terminalPrompt} from ${JSON.stringify(moduleUrl('terminal-input.js'))};
     const [home,phase,method]=process.argv.slice(1),phrase=phase==='new'?${JSON.stringify(secondPhrase)}:${JSON.stringify(phrase)};
