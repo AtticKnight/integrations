@@ -6,6 +6,11 @@ import { DatabaseSync } from 'node:sqlite';
 
 const PROFILE_DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
+export interface BrowserSignInGrant {
+  secret: string;
+  state: 'enrolling' | 'enabled' | 'revocation_pending';
+}
+
 export type AuthMode = 'controller-session' | 'scoped-api-key';
 export type RefreshState = 'READY' | 'IN_FLIGHT' | 'UNKNOWN';
 
@@ -102,6 +107,11 @@ export class MarketplaceProfileStore {
         refresh_expires_at INTEGER,
         refresh_state TEXT NOT NULL DEFAULT 'READY' CHECK (refresh_state IN ('READY','IN_FLIGHT','UNKNOWN')),
         refresh_attempt_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS browser_sign_in_grants (
+        profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+        secret TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('enrolling','enabled','revocation_pending'))
       );
       CREATE TABLE IF NOT EXISTS mutations (
         profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
@@ -252,6 +262,29 @@ export class MarketplaceProfileStore {
     const row = this.db.prepare('SELECT * FROM profiles WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     if (!row) throw new ProfileError('PROFILE_REQUIRED', 'Configure a Marketplace MCP profile in the local terminal first.');
     return profileFromRow(row);
+  }
+
+  browserSignInGrant(id: string): BrowserSignInGrant | undefined {
+    return this.db.prepare('SELECT secret,state FROM browser_sign_in_grants WHERE profile_id=?').get(id) as BrowserSignInGrant | undefined;
+  }
+
+  startBrowserSignInGrant(id: string, secret: string): void {
+    const row = this.db.prepare("INSERT OR IGNORE INTO browser_sign_in_grants(profile_id,secret,state) VALUES(?,?,'enrolling')").run(id,secret);
+    if (!row.changes) throw new ProfileError('BROWSER_GRANT_EXISTS', 'Inspect the current browser sign-in grant before enabling another.');
+  }
+
+  activateBrowserSignInGrant(id: string, secret: string): void {
+    const row = this.db.prepare("UPDATE browser_sign_in_grants SET state='enabled' WHERE profile_id=? AND secret=? AND state='enrolling'").run(id,secret);
+    if (!row.changes) throw new ProfileError('BROWSER_GRANT_CHANGED','Browser sign-in was disabled during enrollment.');
+  }
+
+  disableBrowserSignInGrant(id: string): string | undefined {
+    const row = this.db.prepare("UPDATE browser_sign_in_grants SET state='revocation_pending' WHERE profile_id=? RETURNING secret").get(id);
+    return row?.secret as string | undefined;
+  }
+
+  forgetBrowserSignInGrant(id: string, secret: string, state: 'enrolling' | 'revocation_pending'): void {
+    this.db.prepare('DELETE FROM browser_sign_in_grants WHERE profile_id=? AND secret=? AND state=?').run(id,secret,state);
   }
 
   listProfileIds(): string[] {

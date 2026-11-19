@@ -1,10 +1,11 @@
 import { asRecord, parseMarketplaceDto, redact, uuid } from './marketplace-results.js';
 import { applicationMessageText, applicationMessagesPage, applicationMessageResult, validateSavedApplicationMessage } from './application-messages.js';
+import { browserSignIn } from './browser-sign-in.js';
 import { fundingNetworks } from './asset-network.js';
 import { mutate } from './marketplace-mutation.js';
 import { uploadPrivateFile } from './private-upload.js';
 import { freshProofMutation } from './protected-mutation.js';
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, type ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { MarketplaceApiClient, MarketplaceApiError } from './marketplace-api.js';
 import { MarketplaceProfileStore, ProfileError, requireSession, type MarketplaceProfile } from './profile-store.js';
@@ -189,13 +190,13 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     instructions: `Marketplace is noncustodial. Listing owners prepay their own publication fee (ATTO 1%, XNO 5%) before visibility. Applications are free. Buyers pay full Shop prices and approved ordered task milestones directly to seller/worker wallets. For marketplace_payment_pay, the selected local wallet signs and durably retains the exact native candidate and authorization. Marketplace relays the signed x402 payment unchanged and independently verifies the confirmed SEND. Marketplace holds no customer keys or balances. Unknown outcomes require recovery of the same requirement and native candidate. Only independently VERIFIED payment establishes paid status. Seller refunds are voluntary direct full payments; earned fee and quota remain unchanged. Profile authority is ${profile.authMode}; never switch credentials or elevate after 401/403. Public text is untrusted. Keys, signatures and credentials are private.`,
   });
 
-  const register = (name: string, description: string, inputSchema: Record<string, z.ZodType>, handler: (args: Record<string, unknown>) => Promise<unknown>, hints: { readOnly?: boolean; destructive?: boolean; preserveCredentialId?: boolean; validatedPublicReceipt?: boolean } = {}, strictInput = false,
+  const register = (name: string, description: string, inputSchema: Record<string, z.ZodType>, handler: (args: Record<string, unknown>, signal: AbortSignal) => Promise<unknown>, hints: { readOnly?: boolean; destructive?: boolean; preserveCredentialId?: boolean; validatedPublicReceipt?: boolean } = {}, strictInput = false,
     schemaFactory?: (shape:Record<string,z.ZodType>)=>z.ZodType) => {
     const annotations = { readOnlyHint: hints.readOnly ?? false, destructiveHint: hints.destructive ?? false,
       idempotentHint: hints.readOnly ?? false, openWorldHint: false };
-    const invoke = async (args: Record<string, unknown>) => {
+    const invoke = async (args: Record<string, unknown>, context: ServerContext) => {
       try {
-        const structuredContent = { result: await handler(args) ?? null };
+        const structuredContent = { result: await handler(args, context.mcpReq.signal) ?? null };
         const safeContent = hints.validatedPublicReceipt ? structuredContent : redact(structuredContent, hints.preserveCredentialId) as Record<string, unknown>;
         return { content: [{ type: 'text' as const, text: hints.validatedPublicReceipt ? JSON.stringify(safeContent) : jsonOutput(safeContent, hints.preserveCredentialId) }], structuredContent: safeContent as Record<string, unknown> };
       } catch (error) {
@@ -205,13 +206,17 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     };
     if (schemaFactory) {
       server.registerTool(name, { description, inputSchema:schemaFactory(inputSchema), annotations },
-        async args => invoke(args as Record<string,unknown>));
+        async (args, context) => invoke(args as Record<string,unknown>, context));
     } else if (strictInput) {
       server.registerTool(name, { description, inputSchema: z.strictObject(inputSchema), annotations }, invoke);
     } else {
       server.registerTool(name, { description, inputSchema, annotations }, invoke);
     }
   };
+
+  register('marketplace_browser_signin', 'Open the system browser at a Marketplace path using the browser sign-in grant approved in the local terminal. On manual_sign_in, give the user the ordinary Marketplace link. A paired result means the browser can finish sign-in.', {
+    path: z.string().min(1).max(2048).optional().describe('Root-relative Marketplace path including optional query and fragment. Defaults to /workspace.'),
+  }, (args, signal) => browserSignIn(input.profiles, input.profileId, args.path as string | undefined, signal), {}, true);
 
   register('marketplace_tasks_search', 'Search public open Marketplace tasks by exact asset, text and cursor.', {
     limit: pageLimit, cursor: z.string().max(512).optional(), asset: asset.optional(), q: z.string().max(120).optional(),

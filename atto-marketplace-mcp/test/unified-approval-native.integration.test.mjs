@@ -142,8 +142,8 @@ async function fixture(t, network, origin, actualBackend = false) {
   const originalAttoState = await readFile(join(wallet, 'state.sqlite'));
   const env = {PATH: `${bin}:${process.env.PATH ?? ''}`, HOME: root, DBUS_SESSION_BUS_ADDRESS: '', XDG_RUNTIME_DIR: '',
     MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: wallet, MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: nano};
-  const audience = actualBackend ? process.env.UNIFIED_APPROVAL_BACKEND_AUDIENCE ?? 'urn:marketplace:agent-api:local' : 'unified-approval-fixture';
-  const nanoOptions = {dataDir: nano, recoveryWalletDirectory: wallet, derivationIndex: 1, network: 'nano:dev', rpcUrl: 'http://localhost:17076', origin,
+  const audience = actualBackend ? process.env.UNIFIED_APPROVAL_BACKEND_AUDIENCE ?? 'urn:marketplace:agent-api:local' : origin === 'https://api.atto.market' ? 'urn:marketplace:agent-api:live' : 'unified-approval-fixture';
+  const nanoOptions = {dataDir: nano, recoveryWalletDirectory: wallet, derivationIndex: 1, network: origin === 'https://api.atto.market' ? 'nano:mainnet' : 'nano:dev', rpcUrl: 'http://localhost:17076', origin,
     audience,  grants: { externalTransfers: false,
       controllerPurposes: actualBackend ? ['login'] : []},
     limits: {maxPaymentAtomic: '0', rolling24hAtomic: '0'}, terminalConfirmed: true};
@@ -302,5 +302,23 @@ for (const network of ['ATTO', 'NANO']) test(`${network}: real terminal approval
       : {origin: f.profile.origin, network: 'nano:dev', address: f.address, index: 1, audience: f.profile.audience, purpose: 'login', message: login.message};
     await assert.rejects(callWallet(f.env, {asset, operation: 'controller.sign', input: raw}),
       error => ['LOCAL_SIGNER', 'PERMISSION_DENIED', 'MCP_READ_ONLY'].includes(error.code), 'One-off typed consent must not grant raw headless signing.');
+    await f.assertStandalonePreserved();
+  });
+
+for (const network of ['ATTO','NANO']) test(`${network}: terminal browser sign-in enrollment, revocation and retry`,
+  {skip: process.platform !== 'linux', timeout: 60_000}, async t => {
+    const f = await fixture(t, network, 'https://api.atto.market');
+    const helper = fileURLToPath(new URL('./support/browser-grant-terminal.mjs', import.meta.url));
+    const terminal = fileURLToPath(new URL('./support/run-terminal.py', import.meta.url));
+    const args = {command:[process.execPath, helper, packageDirectory, f.home], prompt:'Type APPROVE to confirm: ',
+      response:'APPROVE', timeoutSeconds:30};
+    const result = JSON.parse(await run('python3', [terminal, JSON.stringify(args)], f.env));
+    const output = Buffer.from(result.transcriptBase64,'base64').toString();
+    f.assertPrivateOutput(output);
+    assert.equal(result.exitCode, 0, 'Browser sign-in terminal fixture failed.');
+    assert.match(output, /"browserSignIn":"enabled"/);
+    assert.match(output, /"browserSignIn":"disabled"/);
+    assert.ok(output.includes(accountId) && output.includes(f.address) && output.includes('Browser origin: https://atto.market'));
+    assert.doesNotMatch(output, /Binding Hash:|Nonce:|fixture-access-token/);
     await f.assertStandalonePreserved();
   });

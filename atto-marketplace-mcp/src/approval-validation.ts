@@ -21,7 +21,7 @@ export function validateTypedApproval(input: unknown, options: {
       ...(options.now === undefined ? {} : { now: options.now }) });
     if (canonicalController(request.controller.address) !== request.controller.address) throw invalid();
     const action = request.action;
-    if (!['login','credential','identity-link','identity-unlink'].includes(String(action.kind))) throw invalid();
+    if (!['login','credential','identity-link','identity-unlink','browser-sign-in-grant'].includes(String(action.kind))) throw invalid();
     if (action.kind === 'identity-link') {
       for (const address of [action.authorizingAddress, action.newIdentityAddress]) {
         if (typeof address !== 'string' || canonicalController(address) !== address) throw invalid();

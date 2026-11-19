@@ -6,8 +6,11 @@ import { resolve } from 'node:path';
 import { ProfileError, MarketplaceProfileStore, type NewProfile } from './profile-store.js';
 import { approvalRequestPath, approvalResponseIsAbsent, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest,
   type MarketplaceProofApprovalRequest } from './approval-files.js';
-import { apiUrl, MarketplaceApiError, signerApiError } from './marketplace-api.js';
+import { apiUrl, MarketplaceApiClient, MarketplaceApiError, requireLiveController, signerApiError } from './marketplace-api.js';
 import { managedWalletEnvironment } from './wallet-home.js';
+import { approveBrowserSignInGrant } from './approval-terminal.js';
+import { requireSetupTerminal } from './terminal-input.js';
+import { browserOrigin } from './browser-sign-in.js';
 import { validateTypedApproval } from './approval-validation.js';
 
 const scopeNames = new Set([
@@ -22,6 +25,7 @@ const responseLimit=1_048_576;
 interface SetupOptions {
   profile?:string;
   home?:string;
+  browserSignIn?: 'enable' | 'disable' | 'status';
   origin?:string;
   audience?:string;
   controllerAddress?:string;
@@ -52,10 +56,14 @@ export async function runSetup(argv:string[],env:NodeJS.ProcessEnv,output:SetupO
   const print:Output=value=>{if(!output.quiet)writeTerminalResult(value,output.json??selected.json);};
   const options=parseSetupArgs(selected.argv);
   const home=resolve(options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env));
-  env=managedWalletEnvironment(home,env);
   if (!options.profile) throw setupUsage('Choose a private profile ID with --profile.');
   const store=await MarketplaceProfileStore.open(home);
   try {
+    if (options.browserSignIn) {
+      await configureBrowserSignIn(store, options.profile, options.browserSignIn, env, print);
+      return;
+    }
+    env=managedWalletEnvironment(home,env);
     if (options.fromProfile || options.credentialId) {
       activateCredential(store,options,print);
       return;
@@ -74,6 +82,66 @@ export async function runSetup(argv:string[],env:NodeJS.ProcessEnv,output:SetupO
     }
     await beginSetup(store,options,home,env,print,output.walletConsent);
   } finally { store.close(); }
+}
+
+async function configureBrowserSignIn(store: MarketplaceProfileStore, id: string, operation: 'enable' | 'disable' | 'status',
+  env: NodeJS.ProcessEnv, print: Output): Promise<void> {
+  const profile = store.getProfile(id);
+  const grant = store.browserSignInGrant(id);
+  if (operation === 'status') {
+    print({profileId: id, browserSignIn: grant?.state ?? 'disabled'});
+    return;
+  }
+  requireSetupTerminal();
+  const api = new MarketplaceApiClient(store, id);
+  const prefix = '/v1/agent/auth/browser-sign-in/grants';
+  if (operation === 'disable') {
+    const secret = store.disableBrowserSignInGrant(id);
+    if (secret) {
+      try {
+        await api.request(prefix + '/revoke', {method: 'POST', auth: 'live-controller', allowStatus: [204], body: {grantSecret: secret}});
+      } catch {
+        throw new ProfileError('BROWSER_REVOCATION_PENDING','Browser sign-in is disabled locally. Server revocation is pending. Retry --browser-sign-in disable with this controller session.');
+      }
+      store.forgetBrowserSignInGrant(id, secret, 'revocation_pending');
+    }
+    print({profileId: id, browserSignIn: 'disabled'});
+    return;
+  }
+  requireLiveController(profile);
+  if (grant?.state === 'enabled') {
+    print({profileId: id, browserSignIn: 'enabled'});
+    return;
+  }
+  if (grant) throw new ProfileError('BROWSER_GRANT_PENDING','A grant change is pending. Use --browser-sign-in disable to revoke the previous enrollment before enabling a new grant.');
+  const secret = randomBytes(32).toString('base64url');
+  const grantHash = createHash('sha256').update(secret, 'utf8').digest('hex');
+  store.startBrowserSignInGrant(id, secret);
+  let submitting = false;
+  try {
+    const challenge = parseChallenge((await api.request(prefix + '/challenges', {method:'POST', auth:'live-controller',
+      allowStatus:[200,201], body:{browserOrigin, grantHash}})).json);
+    const request = createApprovalRequest({profileId:id, handoffId:randomBytes(16).toString('hex'), origin:profile.origin,
+      audience:profile.audience, controllerNetwork:profile.controllerNetwork, controllerAddress:profile.controllerAddress,
+      controllerIndex:profile.controllerIndex, accountId:profile.accountId, identityId:profile.identityId,
+      purpose:'browser sign-in grant', action:{kind:'browser-sign-in-grant', browserOrigin, grantHash}, challenge});
+    if ((challenge.accountId !== undefined && challenge.accountId !== profile.accountId)
+      || (challenge.controllerId !== undefined && challenge.controllerId !== profile.identityId)) throw setupFailure();
+    const signature = await approveBrowserSignInGrant(request, managedWalletEnvironment(store.home, env));
+    const current = store.browserSignInGrant(id);
+    if (current?.state !== 'enrolling' || current.secret !== secret) throw new ProfileError('BROWSER_GRANT_CHANGED','Browser sign-in changed during approval.');
+    submitting = true;
+    await api.request(prefix, {method:'POST', auth:'live-controller', allowStatus:[204], body:{
+      browserOrigin, grantHash, challengeId:challenge.challengeId, message:challenge.message, signature}});
+    store.activateBrowserSignInGrant(id, secret);
+  } catch (error) {
+    if (!submitting) store.forgetBrowserSignInGrant(id, secret, 'enrolling');
+    if (error instanceof ProfileError) throw error;
+    throw new ProfileError('BROWSER_GRANT_FAILED', submitting
+      ? 'Marketplace enrollment could not be confirmed. Use --browser-sign-in disable to revoke it before enabling again.'
+      : 'Marketplace could not prepare browser sign-in. Check the controller session and its native wallet.');
+  }
+  print({profileId:id, browserSignIn:'enabled'});
 }
 
 async function reauthenticate(store:MarketplaceProfileStore,profileId:string,home:string,env:NodeJS.ProcessEnv,print:Output):Promise<void> {
@@ -463,6 +531,12 @@ function parseSetupArgs(argv:string[]):SetupOptions {
   for (let index=0;index<argv.length;index++) {
     const arg=argv[index]!; const value=()=>{const next=argv[++index];if(!next)throw setupUsage(`Missing value for ${arg}.`);return next;};
     switch(arg) {
+      case '--browser-sign-in': {
+        const operation = value();
+        if (operation !== 'enable' && operation !== 'disable' && operation !== 'status') throw setupUsage('Choose --browser-sign-in enable, disable, or status.');
+        result.browserSignIn = operation;
+        break;
+      }
       case '--profile': result.profile=value(); break;
       case '--home': result.home=value(); break;
       case '--origin': result.origin=value(); break;
@@ -487,6 +561,9 @@ function parseSetupArgs(argv:string[]):SetupOptions {
       case '--purchase-xno-limit': result.purchaseXnoLimit=value(); break;
       default: throw setupUsage(`Unknown setup option: ${arg}`);
     }
+  }
+  if (result.browserSignIn && argv.some((arg,index) => index % 2 === 0 && !['--browser-sign-in','--profile','--home'].includes(arg))) {
+    throw setupUsage('Browser sign-in setup takes --profile, --browser-sign-in and optional --home.');
   }
   if (result.profile && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(result.profile)) throw setupUsage('Profile IDs must be 1 to 48 letters, digits, underscores or hyphens.');
   if (result.fromProfile && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(result.fromProfile)) throw setupUsage('Source profile IDs must be 1 to 48 letters, digits, underscores or hyphens.');

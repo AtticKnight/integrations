@@ -24,6 +24,12 @@ Terminal commands print readable summaries by default, including the ready profi
 
 Pin origin/audience/network and retain exact account/controller pins and saved wallet journals. Use `wallet policy --asset ATTO|XNO --allow-external-transfers` only when explicitly authorising local direct payments and review native limits. Configuration alone does not prove node availability. Use `--files-dir` for explicit file selection; no implicit upload occurs. Read the [Marketplace MCP tool and permission reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md) and [Marketplace HTTP integration guide](https://atto.market/integration) before selecting fields or scopes.
 
+### Open Marketplace in your browser
+
+To let a connected controller profile sign in to `atto.market` from a local MCP client, run `atto-marketplace-mcp setup --profile main --browser-sign-in enable` in your terminal and approve the wallet prompt once. Use the same command with `status` or `disable` to inspect or revoke the grant.
+
+Ask the MCP client to open your workspace or a Marketplace page. `marketplace_browser_signin` opens the system browser and pairs the launched tab with the selected controller. Pass a root-relative `path` such as `/shop` or omit it for `/workspace`. The tool returns the ordinary Marketplace link when automatic pairing is unavailable. The browser shows whether sign-in completed.
+
 ### Preauthorize Login only for a dedicated Atto wallet
 
 An administrator can provision a non-root Unix agent with standing authorization for one Marketplace profile and an existing dedicated ATTO wallet on the live network. Supply a root-owned regular JSON file that the agent can read. Mount it as a file with no symlink at the final path and leave group and other write permissions disabled, for example mode `0644`. Use canonical absolute directories and the exact controller address and derivation index:

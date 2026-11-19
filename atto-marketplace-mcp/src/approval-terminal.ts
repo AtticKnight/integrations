@@ -124,14 +124,8 @@ export async function approveMarketplaceController(requestPath: string, options:
       directory: native.directory, marketplaceHome: home, request: currentRequest, authorizationFile: loginAuthorizationFile,
     });
     signature = response.signature;
-  } else if (request.controller.network === 'ATTO') {
-    const response = await signMarketplaceAttoController({ directory: native.directory, request: currentRequest, terminalConfirmed: true });
-    signature = response.signature;
   } else {
-    signature = await signMarketplaceNanoController({ dataDir: native.directory, terminalConfirmed: true, request: {
-      origin: request.marketplaceOrigin, network: native.network, address: request.controller.address, index: request.controller.index,
-      audience: request.audience, purpose: request.purpose, message: request.challenge.message,
-    } });
+    signature = await signApprovedRequest(currentRequest, native);
   }
   await assertUnchanged();
   await validateFresh(currentRequest, native.network);
@@ -184,6 +178,39 @@ export async function approveMarketplaceController(requestPath: string, options:
     }
     return currentRequest;
   }
+}
+
+async function signApprovedRequest(request: MarketplaceProofApprovalRequest, native: {directory: string; network: string}): Promise<string> {
+  if (request.controller.network === 'ATTO') {
+    const response = await signMarketplaceAttoController({ directory: native.directory, request, terminalConfirmed: true });
+    return response.signature;
+  }
+  return signMarketplaceNanoController({ dataDir: native.directory, terminalConfirmed: true, request: {
+    origin: request.marketplaceOrigin, network: native.network, address: request.controller.address, index: request.controller.index,
+    audience: request.audience, purpose: request.purpose, message: request.challenge.message,
+  } });
+}
+
+/** Keep the single attended enrollment proof in memory. No signing authority is added to either native wallet. */
+export async function approveBrowserSignInGrant(request: MarketplaceProofApprovalRequest, env: NodeJS.ProcessEnv): Promise<string> {
+  requireTerminal();
+  if (request.purpose !== 'browser sign-in grant') throw invalid();
+  validateTypedApproval(request);
+  const native = await nativeIdentity(env, request);
+  validateTypedApproval(request, {nativeNetwork: native.network});
+  const preview = [
+    'Allow this Marketplace MCP profile to open a signed-in browser session until you disable browser sign-in?',
+    `Profile: ${request.profileId}`, `Marketplace account: ${request.accountId}`,
+    `Controller: ${request.controller.network} ${request.controller.address} (index ${request.controller.index})`,
+    `Browser origin: ${request.action.browserOrigin}`,
+  ].join('\n');
+  if (!await confirm(preview)) throw new ProfileError('APPROVAL_DECLINED','Browser sign-in enrollment was declined.');
+  requireTerminal();
+  if (canonicalJson(await nativeIdentity(env, request)) !== canonicalJson(native)) throw invalid();
+  validateTypedApproval(request, {nativeNetwork: native.network});
+  const signature = await signApprovedRequest(request, native);
+  await verifyApprovalSignature(request, {signature});
+  return signature;
 }
 
 export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {

@@ -13,7 +13,7 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const USER_APPROVAL_PURPOSES = new Set([
   'login', 'link authorizer', 'link new identity', 'unlink',
-  'API-key creation', 'API-key rotation', 'API-key revocation',
+  'API-key creation', 'API-key rotation', 'API-key revocation', 'browser sign-in grant',
 ]);
 
 export interface MarketplaceProofApprovalRequest {
@@ -134,7 +134,7 @@ export function validateApprovalResponse(request: MarketplaceProofApprovalReques
   return response as unknown as MarketplaceProofApprovalResponse;
 }
 
-export async function verifyApprovalSignature(request: MarketplaceProofApprovalRequest, response: MarketplaceProofApprovalResponse,
+export async function verifyApprovalSignature(request: MarketplaceProofApprovalRequest, response: Pick<MarketplaceProofApprovalResponse, 'signature'>,
   sourceEnv: NodeJS.ProcessEnv = process.env): Promise<void> {
   requireUserApproval(request);
   if (request.controller.network === 'ATTO') {

@@ -43,7 +43,7 @@ export function validateMarketplaceUserProofApproval(input: unknown, options: {
 }): MarketplaceUserProofApprovalRequest {
   const request = parseRequest(input, options.network);
   const purposes = new Set(['login', 'API-key creation', 'API-key rotation', 'API-key revocation',
-    'link authorizer', 'link new identity', 'unlink']);
+    'link authorizer', 'link new identity', 'unlink', 'browser sign-in grant']);
   const atto = options.network === 'ATTO';
   if (!purposes.has(request.purpose)
     || request.controller.network !== options.network || !Number.isSafeInteger(request.controller.index)
@@ -55,6 +55,8 @@ export function validateMarketplaceUserProofApproval(input: unknown, options: {
     || request.transport !== 'AGENT_API' || request.proofOrigin !== null
     || !/^[^\r\n\0]{1,255}$/.test(request.audience) || request.audience.trim() !== request.audience
     || (atto ? options.nativeNetwork !== 'live' : !['nano:mainnet','nano:dev'].includes(options.nativeNetwork))) throw protocolFailure();
+  if (request.purpose === 'browser sign-in grant' && (request.marketplaceOrigin !== 'https://api.atto.market'
+    || request.audience !== 'urn:marketplace:agent-api:live' || options.nativeNetwork !== (atto ? 'live' : 'nano:mainnet'))) throw protocolFailure();
   if (request.action.kind === 'credential' && record(request.action.command).operation !== request.action.operation) throw protocolFailure();
   const message = parseProofMessage(request, atto ? 'Marketplace Agent Controller Proof v1' : 'Nano Marketplace Agent Controller Proof v1');
   if (message.purpose !== request.purpose || expectedPurpose(request.action) !== request.purpose
@@ -242,6 +244,7 @@ function parseProofMessage(request: MarketplaceUserProofApprovalRequest, header 
 function expectedPurpose(action: Record<string, unknown>): string {
   switch (action.kind) {
     case 'login': return 'login';
+    case 'browser-sign-in-grant': return 'browser sign-in grant';
     case 'identity-link': return action.operation === 'AUTHORIZE' ? 'link authorizer'
       : action.operation === 'NEW_IDENTITY' ? 'link new identity' : '';
     case 'identity-unlink': return 'unlink';
@@ -255,6 +258,7 @@ function expectedPurpose(action: Record<string, unknown>): string {
 }
 
 function validActionKeys(action: Record<string, unknown>): boolean {
+  if (action.kind === 'browser-sign-in-grant') return onlyKeys(action, ['kind','browserOrigin','grantHash']);
   if (action.kind === 'login') return onlyKeys(action, ['kind','network','address']);
   if (action.kind === 'identity-link') return onlyKeys(action,
     ['kind','operation','linkId','authorizingIdentityId','authorizingAddress','newIdentityAddress']);
@@ -287,6 +291,11 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest): string | und
     return sha256(['marketplace-login-v1', request.accountId!, request.identityId!].join('\n'));
   }
   if (!request.accountId || !request.identityId) throw protocolFailure();
+  if (action.kind === 'browser-sign-in-grant') {
+    if (action.browserOrigin !== 'https://atto.market' || typeof action.grantHash !== 'string'
+      || !/^[0-9a-f]{64}$/.test(action.grantHash)) throw protocolFailure();
+    return sha256(['marketplace-browser-sign-in-grant-v1', request.accountId, request.identityId, action.browserOrigin, action.grantHash].join('\n'));
+  }
   if (action.kind === 'identity-link') {
     const operation = action.operation;
     const linkId = uuid(action.linkId);

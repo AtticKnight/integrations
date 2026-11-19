@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { productionMarketplaceAudience, productionMarketplaceOrigin } from './defaults.js';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -21,7 +22,9 @@ export interface RequestOptions {
   body?: unknown;
   headers?: Record<string, string>;
   query?: Record<string, string | number | undefined>;
-  auth?: 'required' | 'none';
+  auth?: 'required' | 'none' | 'live-controller';
+  signal?: AbortSignal;
+  requiredBrowserGrant?: string;
   allowStatus?: number[];
 }
 
@@ -92,6 +95,7 @@ export class MarketplaceApiClient {
 
   private async fetchResponse(profile: MarketplaceProfile, path: string, options: RequestOptions,
     timeoutMs: number): Promise<ApiResponse> {
+    if (options.auth === 'live-controller') requireLiveController(profile);
     const url = new URL(apiUrl(profile.origin, path));
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
@@ -99,15 +103,23 @@ export class MarketplaceApiClient {
     const headers: Record<string, string> = { accept: 'application/json', ...options.headers };
     if (options.body !== undefined) headers['content-type'] = 'application/json';
     if (options.auth !== 'none') headers.authorization = `Bearer ${await this.authorization(profile)}`;
+    if (options.requiredBrowserGrant !== undefined) {
+      // A terminal can disable or replace this grant while the controller session refreshes.
+      const grant = this.profiles.browserSignInGrant(profile.id);
+      if (grant?.state !== 'enabled' || grant.secret !== options.requiredBrowserGrant) {
+        throw new ProfileError('BROWSER_GRANT_CHANGED', 'Browser sign-in was disabled or changed during pairing.');
+      }
+    }
 
     let response: Response;
     try {
-        response = await fetch(url, {
+      const timeout = AbortSignal.timeout(Math.max(1, timeoutMs));
+      response = await fetch(url, {
         method: options.method ?? 'GET',
         headers,
         ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
         redirect: 'error',
-        signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
+        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
     } catch {
       throw new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The configured Marketplace endpoint could not be reached. For a mutation, retry with the same request ID.');
@@ -404,4 +416,11 @@ function dateMillis(value: unknown): number {
   const timestamp = Date.parse(value);
   if (!Number.isSafeInteger(timestamp) || timestamp <= 0) throw new Error('bad date');
   return timestamp;
+}
+
+export function requireLiveController(profile: MarketplaceProfile): void {
+  if (profile.authMode !== 'controller-session' || profile.origin !== productionMarketplaceOrigin
+    || profile.audience !== productionMarketplaceAudience) {
+    throw new ProfileError('LIVE_CONTROLLER_REQUIRED', 'Browser sign-in requires a controller session on the live Marketplace Agent API.');
+  }
 }

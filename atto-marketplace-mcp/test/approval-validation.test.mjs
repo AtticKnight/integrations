@@ -85,3 +85,25 @@ function envelope({network,address,nativeNetwork,purpose,action,binding,now=Date
     controller:{network,address,index:7},purpose,action,challenge:{challengeId,issuedAt,expiresAt,
       message:`${network==='ATTO'?'':'Nano '}Marketplace Agent Controller Proof v1\nAudience: marketplace\nNetwork: ${nativeNetwork}\nAddress: ${address}\nPurpose: ${purpose}\nRequest ID: ${challengeId}\nBinding Hash: ${binding}\nNonce: ${'a'.repeat(64)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`}};
 }
+
+for (const network of ['ATTO','NANO']) test(`${network} browser sign-in approval binds live account, controller, browser origin and local grant hash`,() => {
+  const nativeNetwork = network === 'ATTO' ? 'live' : 'nano:mainnet';
+  const action = {kind:'browser-sign-in-grant',browserOrigin:'https://atto.market',grantHash:'5'.repeat(64)};
+  const binding = hash(['marketplace-browser-sign-in-grant-v1',accountId,identityId,action.browserOrigin,action.grantHash]);
+  const request = envelope({network,address:network === 'ATTO' ? atto : nano,nativeNetwork,purpose:'browser sign-in grant',action,binding});
+  request.marketplaceOrigin = 'https://api.atto.market';
+  request.audience = 'urn:marketplace:agent-api:live';
+  request.challenge.message = request.challenge.message.replace('Audience: marketplace','Audience: '+request.audience);
+  assert.deepEqual(validateTypedApproval(request),request);
+  for (const changed of [
+    {...request,marketplaceOrigin:'https://other.example'},
+    {...request,audience:'urn:marketplace:agent-api:local', challenge:{...request.challenge,
+      message:request.challenge.message.replace(request.audience,'urn:marketplace:agent-api:local')}},
+    {...request,transport:'BROWSER',proofOrigin:action.browserOrigin},
+    {...request,accountId:targetId},
+    {...request,identityId:targetId},
+    {...request,action:{...action,grantHash:'6'.repeat(64)}},
+    {...request,action:{...action,browserOrigin:'https://other.example'}},
+    {...request,action:{...action,message:'arbitrary'}},
+  ]) assert.throws(() => validateTypedApproval(changed),{code:'APPROVAL_BINDING'});
+});

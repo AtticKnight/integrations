@@ -22,6 +22,20 @@ test('noncustodial MCP exposes direct evidence and ordered milestones while reti
     assert.equal(tools.find(t=>t.name==='marketplace_tasks_search')?.description,'Search public open Marketplace tasks by exact asset, text and cursor.');
     for(const name of ['marketplace_payment_get','marketplace_payment_pay','marketplace_payment_challenge','marketplace_payment_evidence','marketplace_publication_fee_get','marketplace_task_milestones'])assert.ok(names.includes(name),name);
     for(const name of ['marketplace_balances_get','marketplace_fund','marketplace_funding_status','marketplace_withdrawal_create','marketplace_withdrawals_list','marketplace_payout_address_mutate','marketplace_product_publication_quote'])assert.ok(!names.includes(name),name);
+    const signIn = tools.find(t => t.name === 'marketplace_browser_signin');
+    assert.deepEqual(Object.keys(signIn.inputSchema.properties), ['path']);
+    assert.equal(signIn.inputSchema.additionalProperties, false);
+    for (const args of [{}, {path:'/shop?tab=orders#latest'}]) {
+      const response = await client.callTool({name:signIn.name, arguments:args});
+      assert.notEqual(response.isError,true);
+      assert.equal(response.structuredContent.result.status,'manual_sign_in');
+      assert.equal(response.structuredContent.result.url,'https://atto.market'+(args.path ?? '/workspace'));
+      assert.equal(JSON.stringify(response).includes('test-key'),false);
+    }
+    for (const args of [{path:'//other.example'}, {taskId:id}]) {
+      const response = await client.callTool({name:signIn.name, arguments:args});
+      assert.equal(response.isError,true);
+    }
     const application=tools.find(t=>t.name==='marketplace_application_create');assert.deepEqual(Object.keys(application.inputSchema.properties).sort(),['expectedTaskVersion','proposal','requestId','taskId']);
     const publication=tools.find(t=>t.name==='marketplace_product_publish');assert.ok(publication.inputSchema.required.includes('quantity'));assert.ok(!Object.hasOwn(publication.inputSchema.properties,'maxReservationAtomic'));
   }finally{await client.close();await rm(home,{recursive:true,force:true});}

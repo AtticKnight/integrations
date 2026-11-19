@@ -2,7 +2,7 @@ import { addressPublicKey, canonicalAddress, hexBytes, offchainSign, offchainVer
 import { canonical, exactKeys, loadConfiguration, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { fail } from './errors.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const typedPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink', 'API-key creation', 'API-key rotation', 'API-key revocation', 'payment evidence']);
+const typedPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink', 'API-key creation', 'API-key rotation', 'API-key revocation', 'browser sign-in grant', 'payment evidence']);
 const rawPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink']);
 export interface ControllerProofRequest {
     origin: string;
