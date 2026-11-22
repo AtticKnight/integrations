@@ -186,11 +186,17 @@ test('confirmed account RPC preserves bigint amounts and confirms frontier, bala
   await assert.rejects(client.confirmedAccount(SOURCE), { code: 'SOURCE_FRONTIER_UNCONFIRMED' });
 });
 
-test('account-not-found is nullable only for the exact single-field Nano error', async t => {
+test('account-not-found accepts an optional zero raw balance', async t => {
   let value = { error: 'Account not found' };
   const { client } = await serverFixture(t, () => value);
   assert.equal(await client.accountSnapshotOrNotFound(SOURCE), null);
-  for (const error of [{ error: 'Account not found', frontier: ROOT }, { error: 'Bad account number' }, { error: 1 }]) {
+  value = { error: 'Account not found', balance: '0' };
+  assert.equal(await client.accountSnapshotOrNotFound(SOURCE), null);
+  for (const error of [
+    { error: 'Account not found', balance: '1' }, { error: 'Account not found', balance: 0 },
+    { error: 'Account not found', frontier: ROOT }, { error: 'Account not found', balance: '0', frontier: ROOT },
+    { error: 'Bad account number', balance: '0' }, { error: 1 },
+  ]) {
     value = error;
     await assert.rejects(client.accountSnapshotOrNotFound(SOURCE), rpcError);
   }
@@ -229,6 +235,23 @@ test('block-not-found accepts only the exact absence error; malformed confirmati
   value = evidence(BLOCK, { confirmed: 'TRUE' });
   await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
   value = evidence(BLOCK, { successor: 'malformed' });
+  await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
+});
+
+test('HTTP 404 means an absent block only for an exact block_info error', async t => {
+  let status = 404, value = { error: 'Block not found' };
+  const { client } = await serverFixture(t, (_body, response) => {
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(value));
+  });
+  assert.equal(await client.blockInfo(BLOCK.hash), null);
+  await assert.rejects(client.accountSnapshotOrNotFound(SOURCE), rpcError);
+  for (const invalid of [evidence(), { error: 'Block not found', confirmed: 'false' }, { error: 'Route not found' }]) {
+    value = invalid;
+    await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
+  }
+  status = 503;
+  value = { error: 'Block not found' };
   await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
 });
 
