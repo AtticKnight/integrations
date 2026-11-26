@@ -268,6 +268,12 @@ Watch scopes are mutually exclusive: an index, explicit addresses, a hash
 (transaction or entry only), or `networkWide: true` (account, transaction, or
 entry only). Omitting these selects active wallet accounts. Watches only observe
 events; `watch_read` also reports connection state and errors when no events arrive.
+For multi-account entry and transaction watches, healthy accounts keep delivering
+events while another account reconnects. During any account's retry backoff the
+watch reports `reconnecting`. A watch can report `running` once those waits end
+even if a retried stream has not delivered an event yet. `lastError.address`
+identifies the most recent unresolved account error. When that account's stream
+delivers an event, its error clears and any remaining error can become visible.
 
 `account_get` accepts an `addresses` array for full snapshots of up to 100
 accounts in one tool call. Results preserve address order as

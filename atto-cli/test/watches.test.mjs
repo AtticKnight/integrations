@@ -124,6 +124,53 @@ test('stopping cancels reconnect backoff and frees a bounded session slot', asyn
   assert.throws(() => manager.read(watch.id), { code: 'WATCH_NOT_FOUND' });
 });
 
+test('a healthy account keeps delivering events while another account reconnects', async t => {
+  let firstRequest = true;
+  let retryStream;
+  let healthyStream;
+  const { manager } = await fixture(t, (req, res) => {
+    const publicKey = new URL(req.url, 'http://localhost').pathname.split('/')[2];
+    if (publicKey === otherKey) {
+      healthyStream = res;
+    } else if (firstRequest) {
+      firstRequest = false;
+      res.end(entry(key, 1) + '\n');
+    } else {
+      retryStream = res;
+    }
+  });
+  const watch = manager.start({ event: 'entry', addresses: [address, otherAddress] });
+  await until(() => retryStream && healthyStream);
+  healthyStream.write(entry(otherKey, 1) + '\n');
+  await until(() => manager.read(watch.id).latestCursor === 2);
+
+  const interrupted = manager.read(watch.id);
+  assert.equal(interrupted.lastError?.code, 'STREAM_CLOSED');
+  assert.equal(interrupted.lastError.address, address);
+  assert.equal(interrupted.events[1].data.address, otherAddress);
+
+  retryStream.write(entry(key, 2) + '\n');
+  await until(() => manager.read(watch.id).latestCursor === 3);
+  const recovered = manager.read(watch.id);
+  assert.equal(recovered.status, 'running');
+  assert.equal(recovered.lastError, undefined);
+  assert.deepEqual(recovered.events.map(event => event.data.height), ['1', '1', '2']);
+});
+
+test('a multi-account watch stays reconnecting during another account\'s backoff', async t => {
+  let healthyStream;
+  const { manager } = await fixture(t, (req, res) => {
+    if (new URL(req.url, 'http://localhost').pathname.split('/')[2] === otherKey) healthyStream = res;
+    else res.end(entry(key, 1) + '\n');
+  }, { backoffMs: 60_000 });
+  const watch = manager.start({ event: 'entry', addresses: [address, otherAddress] });
+  await until(() => healthyStream && manager.read(watch.id).status === 'reconnecting');
+  healthyStream.write(entry(otherKey, 1) + '\n');
+  await until(() => manager.read(watch.id).latestCursor === 2);
+  assert.equal(manager.list()[0].status, 'reconnecting');
+  assert.equal(manager.read(watch.id).lastError.address, address);
+});
+
 test('bounded height watches finish without reconnecting and reject cursor misuse', async t => {
   let connections = 0;
   const { manager } = await fixture(t, (_req, res) => { connections++; res.end(entry(key, 2) + '\n' + entry(key, 3) + '\n'); });
