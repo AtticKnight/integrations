@@ -24,7 +24,7 @@ export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
   headers?: Record<string, string>;
-  query?: Record<string, string | number | undefined>;
+  query?: Record<string, string | number | boolean | undefined>;
   auth?: 'required' | 'none' | 'live-controller' | 'controller-session';
   signal?: AbortSignal;
   requiredBrowserGrant?: string;
