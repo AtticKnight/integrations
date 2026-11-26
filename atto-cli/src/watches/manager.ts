@@ -6,13 +6,15 @@ import type { StreamFilter } from '../wallet/types.js';
 interface Checkpoints { get<T>(key: string): T | undefined; set(key: string, value: unknown): void }
 interface WatchOptions { backoffMs?: number; maxBackoffMs?: number; retention?: number; maxWatches?: number }
 interface QueuedEvent { cursor: number; data: unknown; position?: { address: string; height: string }; gap?: boolean }
+interface WatchError { code: string; message: string; address?: string }
 interface Watch {
   id: string;
   filter: StreamFilter;
-  status: 'running' | 'reconnecting' | 'stopped' | 'completed';
+  status: 'running' | 'stopped' | 'completed';
   createdAt: string;
   reconnects: number;
-  lastError?: { code: string; message: string };
+  retryWaits: number;
+  streamErrors: Map<StreamFilter, WatchError>;
   controller: AbortController;
   task: Promise<void>;
   events: QueuedEvent[];
@@ -68,6 +70,7 @@ export class WatchManager {
     }
     const watch: Watch = {
       id: randomUUID(), filter, status: 'running', createdAt: new Date().toISOString(), reconnects: 0,
+      retryWaits: 0, streamErrors: new Map(),
       controller: new AbortController(), task: Promise.resolve(), events: [], sequence: 0,
       acknowledged, observed: { ...acknowledged }, checkpointKey, seen: new Set(),
     };
@@ -132,10 +135,13 @@ export class WatchManager {
   }
 
   private describe(watch: Watch) {
+    const lastError = [...watch.streamErrors.values()].at(-1);
+    const status: Watch['status'] | 'reconnecting' =
+      watch.status === 'running' && watch.retryWaits > 0 ? 'reconnecting' : watch.status;
     return {
-      id: watch.id, filter: watch.filter, status: watch.status, createdAt: watch.createdAt,
+      id: watch.id, filter: watch.filter, status, createdAt: watch.createdAt,
       reconnects: watch.reconnects, replayable: isReplayable(watch.filter),
-      ...(watch.lastError ? { lastError: watch.lastError } : {}),
+      ...(lastError ? { lastError } : {}),
     };
   }
 
@@ -158,8 +164,8 @@ export class WatchManager {
         filter = { ...original, fromHeight: from.toString() };
         watch.observed[address] = (from - 1n).toString();
       }
+      let failure: WatchError;
       try {
-        watch.status = 'running';
         await this.reader.stream(filter, model => {
           if (signal.aborted) return;
           const position = replayable ? eventPosition(model) : undefined;
@@ -172,6 +178,7 @@ export class WatchManager {
             }
           }
           const data = publicModel(model);
+          watch.streamErrors.delete(original);
           if (!replayable) {
             const identity = createHash('sha256').update(JSON.stringify(data)).digest('hex');
             if (watch.seen.has(identity)) return;
@@ -181,22 +188,25 @@ export class WatchManager {
           this.append(watch, data, position);
           if (position) watch.observed[position.address] = position.height;
           delay = this.backoffMs;
-          watch.status = 'running';
-          delete watch.lastError;
         }, signal);
         if (signal.aborted) return;
         if (replayable && address && original.toHeight && BigInt(watch.observed[address] ?? '0') >= BigInt(original.toHeight)) return;
         if (original.hash && watch.events.some(event => !event.gap)) return;
-        watch.lastError = { code: 'STREAM_CLOSED', message: 'The node closed the stream; reconnecting.' };
+        failure = { code: 'STREAM_CLOSED', message: 'The node closed the stream; reconnecting.' };
       } catch (error) {
         if (signal.aborted) return;
         const safe = errorResult(error);
-        watch.lastError = { code: safe.code, message: safe.message };
+        failure = { code: safe.code, message: safe.message };
       }
-      watch.status = 'reconnecting';
+      if (replayable) failure.address = address;
+      // Keep the most recent unresolved error last, including repeated failures of one stream.
+      watch.streamErrors.delete(original);
+      watch.streamErrors.set(original, failure);
+      watch.retryWaits++;
       watch.reconnects++;
       if (!replayable) this.append(watch, { type: 'gap', reason: 'disconnected', replayable: false }, undefined, true);
       await sleep(delay, signal);
+      watch.retryWaits--;
       delay = Math.min(delay * 2, this.maxBackoffMs);
     }
   }

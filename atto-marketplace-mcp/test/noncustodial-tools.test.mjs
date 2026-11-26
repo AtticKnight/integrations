@@ -34,7 +34,9 @@ test('noncustodial MCP exposes direct evidence and ordered milestones while reti
     assert.match(instructions,/Only VERIFIED establishes paid status/);
     assert.match(instructions,/Marketplace holds no customer keys or balances/);
     assert.doesNotMatch(instructions,/All native transactions sign and broadcast locally|never publishes customer payments/);
-    assert.equal(tools.find(t=>t.name==='marketplace_tasks_search')?.description,'Search public open Marketplace tasks by exact asset, text and cursor.');
+    const taskSearch = tools.find(t=>t.name==='marketplace_tasks_search');
+    assert.match(taskSearch.description, /open tasks by default/i);
+    assert.equal(taskSearch.inputSchema.properties.includeInProgress.type, 'boolean');
     for(const name of ['marketplace_payment_get','marketplace_payment_pay','marketplace_payment_relay_reauthorize','marketplace_payment_evidence','marketplace_publication_fee_get','marketplace_task_milestones'])assert.ok(names.includes(name),name);
     for(const name of ['marketplace_payment_challenge','marketplace_balances_get','marketplace_fund','marketplace_funding_status','marketplace_withdrawal_create','marketplace_withdrawals_list','marketplace_payout_address_mutate','marketplace_product_publication_quote'])assert.ok(!names.includes(name),name);
     const recovery=tools.find(t=>t.name==='marketplace_payment_relay_reauthorize');
