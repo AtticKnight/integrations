@@ -313,7 +313,10 @@ Action entries do not supply that send/receive hash linkage.
 Supply multiple `addresses` together for history queries instead of reading
 each account separately. Results follow input address order and ascending
 height within each account. The maximum page size is 1,000 records. Inclusive
-height filters and continuation cursors are supported. Pass a returned
+height ranges accept `last` to read only the final N heights per account.
+For example, `{"index":0,"last":3}` returns heights 52 through 54 for an
+account at height 54. The `limit` field controls how many records fit on a page.
+Pass a returned
 `nextCursor` with the same filters to continue the frozen account ranges;
 restarting with new height queries causes avoidable account-head reads.
 `receivables_list` is a bounded pending-payment scan without cursor support.

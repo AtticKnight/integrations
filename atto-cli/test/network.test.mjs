@@ -170,6 +170,40 @@ test('history pagination batches finite ranges and visits every prefetched addre
   await assert.rejects(reader.list({ ...base, addresses: [otherAddress], cursor: first.nextCursor }), { code: 'INVALID_CURSOR' });
 });
 
+test('recent account history fetches only the requested tail and keeps it stable between pages', async t => {
+  const missing = addresses[0];
+  const ranges = [];
+  let currentHeight = '12';
+  const reader = await server(t, async (req, res) => {
+    const body = await requestBody(req);
+    if (req.url === '/accounts') {
+      res.end('[' + [account(key, '1'), account(otherKey, currentHeight)].join(',') + ']');
+      return;
+    }
+    ranges.push(body.search);
+    res.end(body.search.toReversed().flatMap(range => Array.from({ length: range.toHeight - range.fromHeight + 1 },
+      (_, offset) => entry(publicKeyOf(range.address), range.fromHeight + offset))).join('\n') + '\n');
+  });
+  const base = { event: 'entry', addresses: [missing, address, otherAddress], last: 3, limit: 2 };
+
+  const first = await reader.list(base);
+  assert.deepEqual(first.items.map(value => value.height), ['1', '10']);
+  currentHeight = '14';
+  const next = await reader.list({ ...base, cursor: first.nextCursor });
+  assert.deepEqual(next.items.map(value => value.height), ['11', '12']);
+  assert.equal(next.nextCursor, undefined);
+  assert.deepEqual(ranges, [[{ address, fromHeight: 1, toHeight: 1 }, { address: otherAddress, fromHeight: 10, toHeight: 10 }],
+    [{ address: otherAddress, fromHeight: 11, toHeight: 12 }]]);
+  await assert.rejects(reader.list({ ...base, last: 2, cursor: first.nextCursor }), { code: 'INVALID_CURSOR' });
+  await assert.rejects(reader.list({ ...base, last: undefined, cursor: first.nextCursor }), { code: 'INVALID_CURSOR' });
+
+  const bounded = await reader.list({ ...base, fromHeight: '8', toHeight: '9' });
+  assert.deepEqual(bounded.items.map(value => value.height), ['8', '9']);
+  assert.equal(bounded.nextCursor, undefined);
+  await assert.rejects(reader.list({ ...base, last: 0 }), { code: 'INVALID_LIST' });
+  await assert.rejects(reader.list({ event: 'receivable', addresses: [address], last: 2 }), { code: 'INVALID_LIST' });
+});
+
 test('history timeout commits only a contiguous address prefix and replays buffered later addresses', async t => {
   // Given: the later account arrives completely before the first account stalls.
   let streams = 0;

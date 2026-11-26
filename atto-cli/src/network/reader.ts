@@ -297,6 +297,10 @@ export class NodeReader {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000 || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
       throw new AttoError('INVALID_LIST', 'Use a limit from 1 to 1000 and timeoutMs from 1 to 60000.');
     }
+    const last = request.last;
+    if (last !== undefined && (!Number.isSafeInteger(last) || last < 1 || !isReplayable(filter))) {
+      throw new AttoError('INVALID_LIST', 'last must be a positive safe integer for address-specific transaction or entry history.');
+    }
     const timeout = AbortSignal.timeout(timeoutMs);
     const done = new AbortController();
     const combined = AbortSignal.any([timeout, done.signal, ...(signal ? [signal] : [])]);
@@ -307,7 +311,8 @@ export class NodeReader {
       if (signal?.aborted) throw new AttoError('CANCELLED', 'The network request was cancelled.');
       return { items, timedOut: timeout.aborted && !done.signal.aborted, ...(done.signal.aborted ? { limitReached: true } : {}) };
     }
-    const scope = createHash('sha256').update(JSON.stringify([this.settings.nodeUrl, this.settings.network, filter])).digest('hex');
+    const historyFilter = last === undefined ? filter : { ...filter, last };
+    const scope = createHash('sha256').update(JSON.stringify([this.settings.nodeUrl, this.settings.network, historyFilter])).digest('hex');
     const addresses = filter.addresses!;
     let cursor: HistoryCursor = { version: 1, scope, addressIndex: 0, nextHeight: filter.fromHeight!, upper: addresses.map(() => null) };
     if (request.cursor) {
@@ -321,8 +326,21 @@ export class NodeReader {
       } catch { throw new AttoError('INVALID_CURSOR', 'The continuation cursor is invalid or belongs to a different query.'); }
     }
     try {
+      const fromHeight = BigInt(filter.fromHeight!);
+      const firstHeight = (upper: bigint) => {
+        if (last === undefined) return fromHeight;
+        const start = upper - BigInt(last) + 1n;
+        return start > fromHeight ? start : fromHeight;
+      };
       const advance = () => {
-        while (cursor.addressIndex < addresses.length && cursor.upper[cursor.addressIndex] !== null && BigInt(cursor.nextHeight) > BigInt(cursor.upper[cursor.addressIndex]!)) {
+        while (cursor.addressIndex < addresses.length) {
+          const upper = cursor.upper[cursor.addressIndex];
+          if (upper == null) return;
+          if (BigInt(cursor.nextHeight) <= BigInt(upper)) {
+            const start = firstHeight(BigInt(upper));
+            if (BigInt(cursor.nextHeight) < start) cursor.nextHeight = start.toString();
+            return;
+          }
           cursor.addressIndex++;
           cursor.nextHeight = filter.fromHeight!;
         }
@@ -348,8 +366,8 @@ export class NodeReader {
         const planned: Array<{ index: number; from: bigint; to: bigint; next: bigint; pending: Map<string, Model> }> = [];
         for (let index = cursor.addressIndex; index < addresses.length && capacity > 0 && planned.length < batchSize; index++) {
           if (cursor.upper[index] === null) break;
-          const from = BigInt(index === cursor.addressIndex ? cursor.nextHeight : filter.fromHeight!);
           const upper = BigInt(cursor.upper[index]!);
+          const from = index === cursor.addressIndex ? BigInt(cursor.nextHeight) : firstHeight(upper);
           if (from > upper) continue;
           const count = upper - from + 1n < BigInt(capacity) ? upper - from + 1n : BigInt(capacity);
           planned.push({ index, from, to: from + count - 1n, next: from, pending: new Map() });

@@ -220,6 +220,7 @@ export async function runCli(argv = process.argv): Promise<void> {
   program.command('transaction <hash>').description('Read a raw signed protocol transaction; use entry for action history').action(hash => call('transaction_get', { hash }));
   program.command('entry <hash>').description('Read an action entry with owner, sender/receiver or new representative, and transfer amount').action(hash => call('entry_get', { hash }));
   listOptions(program.command('history [event]').description('Read action entries by default; choose transaction for raw signed protocol records'))
+    .option('--last <count>', 'Read the last N heights per selected account within the height range', number)
     .option('--cursor <cursor>', 'Continue a previous history page with the same filters')
     .option('--from-height <height>', 'Inclusive starting height')
     .option('--to-height <height>', 'Inclusive ending height')
@@ -457,7 +458,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto address activate': 'atto address activate 1', 'atto address deactivate': 'atto address deactivate 1',
     'atto account': 'atto account --index 0', 'atto balances': 'atto balances\n  atto balances --all',
     'atto transaction': 'atto transaction <hash>', 'atto entry': 'atto entry <hash>',
-    'atto history': 'atto history --index 0\n  atto history transaction --addresses <address>',
+    'atto history': 'atto history --index 0 --last 10\n  atto history transaction --addresses <address>',
     'atto receivables': 'atto receivables --index 1',
     'atto labels': 'atto labels set 1 \"Savings\"\n  atto labels list --all',
     'atto labels set': 'atto labels set 1 \"Savings\"', 'atto labels remove': 'atto labels remove 1',
