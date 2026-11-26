@@ -296,9 +296,16 @@ export async function runCli(argv = process.argv): Promise<void> {
       output({ approved: true, responseFile, handoffId: preview.handoffId,
         challengeId: preview.challengeId, expiresAt: preview.expiresAt }, 'marketplace_approve');
     });
-  program.command('quote').description('Preview a USD-to-Atto conversion using the indicative market price; does not send funds')
-    .requiredOption('--usd <amount>', 'Exact USD amount')
-    .action(options => call('price_quote', { amount: options.usd }));
+  program.command('quote').description('Preview a conversion between USD and ATTO at the indicative market price')
+    .option('--usd <amount>', 'USD amount to convert to ATTO')
+    .option('--atto <amount>', 'ATTO amount to value in USD')
+    .action(options => {
+      if ((options.usd === undefined) === (options.atto === undefined)) {
+        throw new AttoError('INVALID_INPUT', 'Supply exactly one of --usd or --atto.');
+      }
+      return call('price_quote', options.usd === undefined
+        ? { amount: options.atto, from: 'ATTO' } : { amount: options.usd });
+    });
   const terms = program.command('terms').description('Terms for USD-priced payments');
   terms.command('show').description('Read current terms and required acceptance version').action(() => call('terms_get'));
   terms.command('accept').description('Record explicit acceptance after reading the current terms')
@@ -469,7 +476,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto marketplace': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto marketplace approve ./marketplace-approval-request.json',
     'atto marketplace connect': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example',
     'atto marketplace approve': 'atto marketplace approve ./marketplace-approval-request.json',
-    'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
+    'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1\n  atto quote --atto 100000',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',
     'atto terms accept': 'atto terms accept --version <version-shown-by-terms-show> --accepted',
     'atto receive': 'atto receive <send-hash> --index 1', 'atto receive-all': 'atto receive-all --index 1',

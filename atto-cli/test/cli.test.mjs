@@ -259,6 +259,23 @@ test('Marketplace connection command requires a terminal and accepts only the na
   assert.deepEqual(provisioned.browserOrigins, ['https://site.example', 'https://admin.example']);
 });
 
+test('quote values either currency and requires exactly one source amount', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'atto-cli-quote-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fixture = `globalThis.fetch = async () => Response.json({ metrics: [
+    { name: 'price.usd', value: '0.00125', date: new Date().toISOString().slice(0, 10) }
+  ] });`;
+  const run = args => execute(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(fixture)}`,
+    join(cliDirectory, 'dist/cli/main.js'), '--json', '--no-update-notifier', '--data-dir', directory, 'quote', ...args]);
+  const dollars = JSON.parse((await run(['--usd', '2'])).stdout).result;
+  const atto = JSON.parse((await run(['--atto', '400'])).stdout).result;
+  assert.equal(dollars.amount.atto, '1600');
+  assert.equal(atto.usd, '0.5');
+  for (const args of [[], ['--atto', '1', '--usd', '1']]) {
+    await assert.rejects(run(args), error => JSON.parse(error.stdout).error.code === 'INVALID_INPUT');
+  }
+});
+
 test('real CLI refuses nonterminal recovery commands and prints only public JSON', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'atto-cli-interface-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

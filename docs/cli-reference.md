@@ -59,6 +59,7 @@ atto pool status
 atto journal list --status unknown --limit 20
 atto journal show order-42
 atto quote --usd 1
+atto quote --atto 100000
 atto metrics
 atto receivables --limit 100
 atto receive <send-hash> --index 0

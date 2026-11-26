@@ -211,6 +211,10 @@ defaulting to 50. Continue with the returned cursor and the same status filter.
 `journal_get` takes `{requestId}` and returns `{record}`, including stored
 metadata and payment progress; an absent ID returns `JOURNAL_NOT_FOUND`.
 
+`price_quote` accepts an exact decimal string in `amount`. The input defaults to
+USD. Pass `{"amount":"100000","from":"ATTO"}` to get the indicative USD value of
+100,000 ATTO. Both directions return the daily price, its observation date and source.
+
 USD sends use an indicative conversion and require explicit acceptance of the
 current terms. Read `terms_get`, obtain the user's acknowledgement, and call
 `terms_accept` with that version and `accepted: true`. `metrics_get` and

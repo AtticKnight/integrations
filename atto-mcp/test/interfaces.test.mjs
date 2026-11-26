@@ -54,7 +54,10 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.find(tool => tool.name === 'message_verify').annotations.readOnlyHint, true);
   assert.match(result.tools.find(tool => tool.name === 'message_sign').description, /locally approved messageSigningIndexes/);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
-  assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
+  const quote = result.tools.find(tool => tool.name === 'price_quote');
+  assert.equal(quote.annotations.readOnlyHint, true);
+  assert.deepEqual(quote.inputSchema.properties.from.enum, ['USD', 'ATTO']);
+  assert.deepEqual(quote.inputSchema.required, ['amount']);
   assert.equal(result.tools.find(tool => tool.name === 'terms_accept').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'pool_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'address_add').annotations.idempotentHint, false);
