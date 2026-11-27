@@ -378,8 +378,13 @@ atto limits set --recipients any
 ```
 
 Replace the placeholder with the merchant's public `atto://` address.
-`none` pauses outgoing payments and keeps receiving available. `any` removes
-the destination restriction. Payments by label use the resolved address.
+`none` pauses new outgoing authorizations in this wallet. Receiving stays
+available. Before a durable Marketplace payment is handed over for publication,
+the wallet checks the recipient again. A pause preserves the signed payment
+and its reservation. Approving the recipient again lets the same payment
+proceed. A payment already handed to Marketplace can still settle after a pause.
+
+`any` removes the destination restriction. Payments by label use the resolved address.
 A consolidation checks the final recipient and can move funds between its
 approved source accounts. You can still look up a payment that already settled.
 
