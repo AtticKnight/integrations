@@ -88,9 +88,11 @@ A missing transaction or mismatched expectation returns exit status 1 with
 `result.verified: false` and a reason. A node or input error returns `error`.
 You can retry a missing transaction after the payer's node confirms it.
 
-For a checkout, generate an address per invoice or bind the expected sender
-through an authenticated order. In the transaction that marks the order paid,
-enforce a unique constraint on the pair `(network, hash)` across all orders.
+For a checkout, give each invoice its own receiving address. If you reuse an
+address, establish a separate way to bind the payment to that invoice. The
+same sender can pay the same amount on different orders, and an older payment
+can also match. In the transaction that marks the order paid, enforce a unique
+constraint on the pair `(network, hash)` across all orders.
 Repeating the same verification returns the same match and leaves redemption
 to the service. Use a node you trust to report confirmed transactions.
 
