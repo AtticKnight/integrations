@@ -1,0 +1,42 @@
+name: Check the Windows Marketplace refund retry
+on:
+  push:
+    branches: [verify/native-recipient-allowlist]
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows ${{ matrix.revision.name }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        revision:
+          - name: pull-request head
+            ref: 01363335139f68b10b229dd40ab9abe0e80ced43
+            full: true
+          - name: unmodified base
+            ref: c97ef7753c4a8ecedccd086cdf928533ab87dd38
+            full: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.revision.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.3'
+      - run: npm ci
+      - run: npm run build
+      - name: Run the same controller-session refund replay in two fresh processes
+        shell: pwsh
+        run: |
+          foreach ($attempt in 1..2) {
+            node --test --test-name-pattern 'ATTO controller-session direct reservation and refund retry same keys' atto-marketplace-mcp/test/stdio-purchases.test.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - if: matrix.revision.full && !cancelled()
+        run: npm run check
+      - if: matrix.revision.full && !cancelled()
+        run: npm test
