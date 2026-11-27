@@ -70,11 +70,17 @@ atto transaction <hash>
 atto entry <hash>
 atto history transaction --addresses <atto-address> --from-height 1 --limit 50
 atto history --index 0
+atto history --index 0 --last 10
 atto history entry --addresses <atto-address> --cursor <returned-cursor>
 atto watch account --addresses <atto-address>
 atto watch receivable --addresses <atto-address> --min-amount-raw 1
 atto watch transaction --network-wide
 ```
+
+`--last N` selects the last N heights in each account's requested range.
+For example, an account at height 54 returns heights 52, 53 and 54 with
+`--last 3`. `--limit` sets the page size across all selected accounts. Pass
+the same `--last` and height options when continuing with `--cursor`.
 
 To send 1 ATTO from account 0 to saved account 1, use
 `atto send --to-index 1 --amount 1`. The destination must already be saved;

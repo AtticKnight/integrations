@@ -28,6 +28,6 @@ export interface StreamFilter {
   toHeight?: string;
   minAmountRaw?: string;
 }
-export interface ListRequest extends StreamFilter { limit?: number; timeoutMs?: number; cursor?: string }
+export interface ListRequest extends StreamFilter { limit?: number; last?: number; timeoutMs?: number; cursor?: string }
 export interface SendRequest { index?: number; destination?: string; destinationLabel?: string; amount: string; unit?: AmountUnit | 'USD'; requestId: string; metadata?: PaymentMetadata }
 export interface ReceiveRequest { index?: number; hash: string; representative?: string }

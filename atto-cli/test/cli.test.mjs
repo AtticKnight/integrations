@@ -171,6 +171,7 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   const pool = JSON.parse((await run(['pool', 'status'])).stdout).result;
   const indexed = JSON.parse((await run(['send', '--to-index', '1', '--amount', '1'])).stdout).result;
   const history = JSON.parse((await run(['history', '--index', '1'])).stdout).result;
+  const recent = JSON.parse((await run(['history', 'transaction', '--index', '1', '--last', '10', '--limit', '3'])).stdout).result;
   const accounts = JSON.parse((await run(['account', '--addresses', 'atto_a,atto_b'])).stdout).result;
   const batchOverride = JSON.parse((await run(['wallet', 'configure', '--node-batch-size', '1000'])).stdout).result;
   const autoBatch = JSON.parse((await run(['wallet', 'configure', '--node-batch-size', 'auto'])).stdout).result;
@@ -195,6 +196,7 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   assert.equal(indexed.input.unit, 'ATTO');
   assert.match(indexed.input.requestId, /^[0-9a-f-]{36}$/);
   assert.deepEqual(history, { name: 'history_list', input: { event: 'entry', index: 1 } });
+  assert.deepEqual(recent, { name: 'history_list', input: { event: 'transaction', index: 1, last: 10, limit: 3 } });
   assert.deepEqual(accounts, { name: 'account_get', input: { addresses: ['atto_a', 'atto_b'] } });
   assert.deepEqual(batchOverride, { name: 'wallet_configure', input: { nodeBatchSize: 1000 } });
   assert.deepEqual(autoBatch, { name: 'wallet_configure', input: { nodeBatchSize: null } });

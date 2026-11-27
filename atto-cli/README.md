@@ -103,7 +103,7 @@ an approved [account pool](https://github.com/attocash/integrations/blob/main/do
 
 | Task | Command |
 | --- | --- |
-| Recent payment activity | `atto history --limit 10` |
+| Latest 10 ledger entries for account 0 | `atto history --index 0 --last 10` |
 | Pending incoming payments | `atto receivables --limit 10` |
 | Observe incoming payment events | `atto watch receivable` |
 | Receive a batch for account 0 | `atto receive-all --index 0` |
