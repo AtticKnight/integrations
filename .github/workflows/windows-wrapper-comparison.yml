@@ -1,0 +1,60 @@
+name: Compare Windows release test concurrency
+on:
+  push:
+    branches: [verify/windows-wrapper-concurrency]
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows with ${{ matrix.files }} concurrent files
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        files: [2, 3]
+    env:
+      FILES_UNDER_TEST: ${{ matrix.files }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: c97ef7753c4a8ecedccd086cdf928533ab87dd38
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+          cache: npm
+      - name: Apply the two experimental runner settings
+        shell: pwsh
+        run: |
+          $path = (Resolve-Path 'scripts/test.mjs').Path
+          $source = [IO.File]::ReadAllText($path)
+          $argsBefore = "['--test', ...reporter,"
+          $budgetBefore = 'const runnerMinutes = 8;'
+          if (-not $source.Contains($argsBefore) -or -not $source.Contains($budgetBefore)) {
+            throw 'The test wrapper differs from the expected upstream revision.'
+          }
+          $newSource = $source.Replace($argsBefore, "['--test', '--test-concurrency=$env:FILES_UNDER_TEST', ...reporter,")
+          $newSource = $newSource.Replace($budgetBefore, 'const runnerMinutes = 12;')
+          [IO.File]::WriteAllText($path, $newSource, [Text.UTF8Encoding]::new($false))
+          git diff -- scripts/test.mjs
+          node --version
+      - run: npm ci
+        timeout-minutes: 5
+      - run: npm run check
+        timeout-minutes: 5
+      - name: Run the complete npm test command
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $timer = [Diagnostics.Stopwatch]::StartNew()
+          npm.cmd test
+          $status = $LASTEXITCODE
+          $seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+          "npm test took $seconds seconds (including the build), exit $status." | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          exit $status
+      - name: Verify clean installed CLI and MCP packages
+        if: ${{ !cancelled() }}
+        run: npm run test:package
+        timeout-minutes: 20
+        env:
+          ATTO_TEST_PACKAGE_INTEGRATION: '0'
