@@ -94,7 +94,8 @@ test('pausing outgoing recipients leaves a pending incoming payment receivable',
   const { proposal } = await f.app.call('limits_propose', { policy: f.app.ledger.policy(), access: 'spend', recipientAllowlist: [] });
   await f.app.approveLimitsProposal(proposal.id);
   const received = await f.app.call('receive', { index: 1, hash: incoming.hash });
-  assert.equal(received.status, 'published');
+  assert.equal(received.status, 'received');
+  assert.equal(received.amount.raw, '1');
   assert.deepEqual(f.app.ledger.recipientAllowlist(), []);
 });
 

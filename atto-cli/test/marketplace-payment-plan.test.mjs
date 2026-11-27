@@ -112,7 +112,8 @@ test('Marketplace amount setup preserves recipients and cannot resume a proposal
   assert.deepEqual(before.recipientAllowlist, allowed);
   assert.equal(inspectMarketplacePaymentIntent(before, 'limited').resumeProposalId, undefined);
   const plan = await prepareMarketplacePayments({ expected: before, mode: 'limited' });
-  assert.ok(plan.review.includes(before.address));
+  assert.ok(plan.review.includes(`Approved ATTO recipients: ${before.address}`));
+  assert.match(plan.review, /Pending ATTO recipients to replace: any ATTO address/);
   const saved = await plan.commit();
   assert.deepEqual(saved.recipientAllowlist, allowed);
 });

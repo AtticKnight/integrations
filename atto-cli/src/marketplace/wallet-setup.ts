@@ -330,8 +330,12 @@ function marketplacePaymentReview(before: MarketplaceWalletSetupSnapshot, reques
     + (resume ? `${previousChanged ? 'Approve the current pending native settings' : 'Resume the exact existing pending native settings'}, expiring ${new Date(resume.expiresAt).toISOString()}.\n` : '')
     + (pending && !resume && changesAuthority ? `This replaces the existing pending native settings only after approval.\n`
       + `Pending native settings to replace: access ${pending.access}; ${formatSpendingPolicy(pending.policy)}; payment pool indexes ${(pending.pool ?? before.pool).indexes.join(', ')}; consolidation ${(pending.pool ?? before.pool).consolidate ? 'enabled' : 'disabled'}; expires ${new Date(pending.expiresAt).toISOString()}.\n`
+      + (pending.recipientAllowlist !== undefined && !isDeepStrictEqual(pending.recipientAllowlist, before.recipientAllowlist)
+        ? `Pending ATTO recipients to replace: ${formatRecipientAllowlist(pending.recipientAllowlist)}\n` : '')
       + ((pending.messageSigningIndexes ?? []).length ? `Pending generic message signing indexes to replace: ${pending.messageSigningIndexes!.join(', ')}.\n` : '') : '')
     + (previousChanged && pending && !resume && !changesAuthority ? `Current pending native settings remain unchanged: access ${pending.access}; ${formatSpendingPolicy(pending.policy)}; payment pool indexes ${(pending.pool ?? before.pool).indexes.join(', ')}; consolidation ${(pending.pool ?? before.pool).consolidate ? 'enabled' : 'disabled'}; expires ${new Date(pending.expiresAt).toISOString()}.\n`
+      + (pending.recipientAllowlist !== undefined && !isDeepStrictEqual(pending.recipientAllowlist, before.recipientAllowlist)
+        ? `Current pending ATTO recipients: ${formatRecipientAllowlist(pending.recipientAllowlist)}\n` : '')
       + ((pending.messageSigningIndexes ?? []).length ? `Current pending generic message signing indexes: ${pending.messageSigningIndexes!.join(', ')}.\n` : '') : '')
     + (mode !== 'login-only' ? 'These limits and payment history are shared with CLI payments.\n' : '');
 }
