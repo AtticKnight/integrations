@@ -1,0 +1,9 @@
+name: Verify the Windows two-file cap across the release matrix
+on:
+  push:
+    branches: [verify/windows-two-release]
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: ./.github/workflows/ci.yml
