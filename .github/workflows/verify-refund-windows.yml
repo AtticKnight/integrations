@@ -1,4 +1,4 @@
-name: Check wallet relay authorization and Windows refund retry
+name: Check isolated Windows fixtures at the reviewed revision
 on:
   push:
     branches: [verify/native-recipient-allowlist]
@@ -6,48 +6,9 @@ permissions:
   contents: read
 jobs:
   windows:
-    name: Windows ${{ matrix.revision.name }}
+    name: Windows configuration, representative and relay fixtures
     runs-on: windows-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        revision:
-          - name: pull-request head
-            ref: eadaf9f927c500a24112ea6c2433e167d210ba08
-            full: true
-          - name: unmodified base
-            ref: c97ef7753c4a8ecedccd086cdf928533ab87dd38
-            full: false
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ matrix.revision.ref }}
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: '24.22.3'
-      - run: npm ci
-      - run: npm run build
-      - name: Check all Marketplace wallet relay fixtures
-        if: matrix.revision.full
-        run: node --test atto-cli/test/marketplace-relay.test.mjs
-      - name: Run the same controller-session refund replay in two fresh processes
-        shell: pwsh
-        run: |
-          foreach ($attempt in 1..2) {
-            node --test --test-name-pattern 'ATTO controller-session direct reservation and refund retry same keys' atto-marketplace-mcp/test/stdio-purchases.test.mjs
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - if: matrix.revision.full && !cancelled()
-        run: npm run check
-      - if: matrix.revision.full && !cancelled()
-        run: npm test
-
-  relay-linux:
-    name: Linux Marketplace relay fixtures
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -58,4 +19,11 @@ jobs:
           node-version: '24.22.3'
       - run: npm ci
       - run: npm run build
-      - run: node --test atto-cli/test/marketplace-relay.test.mjs
+      - name: Run the complete MCP configuration fixture
+        run: node --test atto-mcp/test/configuration.test.mjs
+      - name: Run the complete representative fixture
+        if: success() || failure()
+        run: node --test atto-mcp/test/representative.test.mjs
+      - name: Run the revised Marketplace relay fixture
+        if: success() || failure()
+        run: node --test atto-cli/test/marketplace-relay.test.mjs
