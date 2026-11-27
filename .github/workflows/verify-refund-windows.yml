@@ -20,9 +20,9 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: Run every platform-supported test file
-        shell: bash
+        shell: pwsh
         run: |
-          node --input-type=module - <<'JS'
+          @'
           import { spawnSync } from 'node:child_process';
           import { globSync, readFileSync } from 'node:fs';
           import { relative, resolve } from 'node:path';
@@ -41,4 +41,5 @@ jobs:
           ], { stdio: 'inherit' });
           if (test.error) throw test.error;
           process.exitCode = test.status ?? 1;
-          JS
+          '@ | node --input-type=module -
+          exit $LASTEXITCODE
