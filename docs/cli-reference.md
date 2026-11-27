@@ -68,6 +68,7 @@ atto representative change <atto-address> --index 0
 atto representative weight <atto-address>
 atto transaction <hash>
 atto entry <hash>
+atto verify-payment <send-hash> --to <recipient> --amount 1.000000001
 atto history transaction --addresses <atto-address> --from-height 1 --limit 50
 atto history --index 0
 atto history --index 0 --last 10
@@ -76,6 +77,22 @@ atto watch account --addresses <atto-address>
 atto watch receivable --addresses <atto-address> --min-amount-raw 1
 atto watch transaction --network-wide
 ```
+
+Use `atto --json verify-payment <send-hash> --to <recipient> --amount <amount>`
+to check a payment against your invoice on the profile's network. Supply
+`--from <sender>` to require the payer's address or `--unit RAW` for raw units.
+The command reads the confirmed transaction from your configured node. It checks
+the block hash, network, SEND type, addresses and exact amount in a single lookup.
+A match returns exit status 0 with the send hash, height and payment details.
+A missing transaction or mismatched expectation returns exit status 1 with
+`result.verified: false` and a reason. A node or input error returns `error`.
+You can retry a missing transaction after the payer's node confirms it.
+
+For a checkout, generate an address per invoice or bind the expected sender
+through an authenticated order. In the transaction that marks the order paid,
+enforce a unique constraint on the pair `(network, hash)` across all orders.
+Repeating the same verification returns the same match and leaves redemption
+to the service. Use a node you trust to report confirmed transactions.
 
 `--last N` selects the last N heights in each account's requested range.
 For example, an account at height 54 returns heights 52, 53 and 54 with
