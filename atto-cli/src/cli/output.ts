@@ -19,7 +19,7 @@ function label(key: string): string {
   const names: Record<string, string> = {
     id: 'ID', requestId: 'Request ID', raw: 'RAW', atto: 'ATTO', usd: 'USD',
     priceUsd: 'Price per ATTO (USD)', nodeUrl: 'Node URL', workerUrl: 'Worker URL',
-    mcpAccess: 'Agent access', perRequest: 'Per payment', minReceiveRaw: 'Minimum receive (RAW)',
+    mcpAccess: 'Agent access', recipientAllowlist: 'Approved ATTO recipients', perRequest: 'Per payment', minReceiveRaw: 'Minimum receive (RAW)',
     weight: 'Weight (RAW)',
     directory: 'Profile', receivingInThisProcess: 'Receiving in this process',
   };

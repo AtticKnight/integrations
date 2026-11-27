@@ -66,6 +66,29 @@ test('strict JSON handles bounded adversarial quoted keys and values at the exac
   assert.throws(()=>parseJsonObject(JSON.stringify({value:multibyteValue+'a'})),/JSON input exceeds its byte limit/);
 });
 
+test('Marketplace checks the ATTO recipient list before preparing a relay payment', { timeout: 20_000 }, async t => {
+  const f = await fixture(t, ['100']);
+  const app = f.open('mcp', { internalMarketplaceAuthorizeWrite: () => {} });
+  const termsForPayment = { ...terms('ATTO', f.addresses[0].address, f.recipient.address), baselineFrontier: '01'.repeat(32) };
+  const request = { requestId: paymentId, origin: 'https://marketplace.example', audience: 'marketplace',
+    terms: termsForPayment, paymentRequired: offer(termsForPayment), index: 0 };
+  const configure = async recipientAllowlist => {
+    const { proposal } = await f.app.call('limits_propose', { policy: f.app.ledger.policy(), access: 'spend', recipientAllowlist });
+    await f.app.approveLimitsProposal(proposal.id);
+  };
+  await configure([]);
+  const reads = f.secretReads;
+  await assert.rejects(app.marketplaceRelay('payment_prepare', request), { code: 'RECIPIENT_NOT_APPROVED' });
+  assert.equal(f.secretReads, reads);
+  assert.equal(app.ledger.get(paymentId), undefined);
+
+  await configure([f.recipient.address]);
+  const prepared = await app.marketplaceRelay('payment_prepare', request);
+  assert.ok(prepared.hash);
+  assert.equal(app.ledger.get(paymentId).destination, f.recipient.address);
+  assert.equal(f.state.publicationAttempts.length, 0);
+});
+
 test('Marketplace relay signs locally, retains exact authorization through restart, and never publishes from wallet commands', {timeout:20000},async t=>{
   // Given a selected wallet with its existing spend grant and immutable seller requirement.
   const f=await fixture(t,['100']), app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
