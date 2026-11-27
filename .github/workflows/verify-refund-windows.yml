@@ -1,4 +1,4 @@
-name: Check the Windows Marketplace refund retry
+name: Check wallet relay authorization and Windows refund retry
 on:
   push:
     branches: [verify/native-recipient-allowlist]
@@ -14,7 +14,7 @@ jobs:
       matrix:
         revision:
           - name: pull-request head
-            ref: 01363335139f68b10b229dd40ab9abe0e80ced43
+            ref: eadaf9f927c500a24112ea6c2433e167d210ba08
             full: true
           - name: unmodified base
             ref: c97ef7753c4a8ecedccd086cdf928533ab87dd38
@@ -29,6 +29,9 @@ jobs:
           node-version: '24.22.3'
       - run: npm ci
       - run: npm run build
+      - name: Check all Marketplace wallet relay fixtures
+        if: matrix.revision.full
+        run: node --test atto-cli/test/marketplace-relay.test.mjs
       - name: Run the same controller-session refund replay in two fresh processes
         shell: pwsh
         run: |
@@ -40,3 +43,19 @@ jobs:
         run: npm run check
       - if: matrix.revision.full && !cancelled()
         run: npm test
+
+  relay-linux:
+    name: Linux Marketplace relay fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: eadaf9f927c500a24112ea6c2433e167d210ba08
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.3'
+      - run: npm ci
+      - run: npm run build
+      - run: node --test atto-cli/test/marketplace-relay.test.mjs
