@@ -86,7 +86,9 @@ the block hash, network, SEND type, addresses and exact amount in a single looku
 A match returns exit status 0 with the send hash, height and payment details.
 A missing transaction or mismatched expectation returns exit status 1 with
 `result.verified: false` and a reason. A node or input error returns `error`.
-You can retry a missing transaction after the payer's node confirms it.
+An HTTP 404 sets `result.reason` to `not_found`. A node timeout sets `error.code`
+to `NODE_TIMEOUT` and also exits 1. In either case, keep the invoice pending and
+retry the same hash with bounded backoff. The payer only needs to send once.
 
 For a checkout, give each invoice its own receiving address. If you reuse an
 address, establish a separate way to bind the payment to that invoice. The

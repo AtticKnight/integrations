@@ -317,7 +317,10 @@ string, optional `unit` (`ATTO` or `RAW`), and optional `sender`. The operation
 checks one confirmed SEND on the profile's network through its configured node.
 On a match it returns `verified: true`, the network, hash, sender, recipient,
 height and exact amount. A missing or mismatched payment returns
-`verified: false` with a reason. Node errors use the usual tool error response.
+`verified: false` with a reason. An HTTP 404 sets `result.reason` to `not_found`.
+A timeout sets `isError: true` and `structuredContent.error.code` to `NODE_TIMEOUT`.
+In either case, keep the invoice pending and retry the same hash with bounded
+backoff. The payer only needs to send once.
 A merchant can use an invoice-specific address and redeem each `(network, hash)`
 once across its orders. Read-only verification can be repeated.
 
