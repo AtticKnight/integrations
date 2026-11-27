@@ -1,0 +1,9 @@
+name: Verify the release matrix
+on:
+  push:
+    branches: [verify/windows-release-budget]
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: ./.github/workflows/ci.yml
