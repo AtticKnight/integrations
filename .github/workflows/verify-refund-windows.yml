@@ -1,4 +1,4 @@
-name: Check isolated Windows fixtures at the reviewed revision
+name: Run the complete Windows suite with bounded concurrency
 on:
   push:
     branches: [verify/native-recipient-allowlist]
@@ -6,9 +6,9 @@ permissions:
   contents: read
 jobs:
   windows:
-    name: Windows configuration, representative and relay fixtures
+    name: Complete Windows suite, two concurrent files
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -19,11 +19,26 @@ jobs:
           node-version: '24.22.3'
       - run: npm ci
       - run: npm run build
-      - name: Run the complete MCP configuration fixture
-        run: node --test atto-mcp/test/configuration.test.mjs
-      - name: Run the complete representative fixture
-        if: success() || failure()
-        run: node --test atto-mcp/test/representative.test.mjs
-      - name: Run the revised Marketplace relay fixture
-        if: success() || failure()
-        run: node --test atto-cli/test/marketplace-relay.test.mjs
+      - name: Run every platform-supported test file
+        shell: bash
+        run: |
+          node --input-type=module - <<'JS'
+          import { spawnSync } from 'node:child_process';
+          import { globSync, readFileSync } from 'node:fs';
+          import { relative, resolve } from 'node:path';
+          import { selectPlatformTests, reportPlatformExclusions } from './scripts/test-platform.mjs';
+          const { scripts } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const marker = 'node scripts/test.mjs ';
+          if (!scripts.test.includes(marker)) throw new Error('Unknown package test invocation');
+          const patterns = scripts.test.split(marker)[1].trim().split(/\s+/);
+          const files = globSync(patterns).map(file => relative(process.cwd(), resolve(file))).sort();
+          const { included, excluded } = selectPlatformTests(files);
+          if (!included.length) throw new Error('No test files selected');
+          reportPlatformExclusions(excluded);
+          console.log('Running', included.length, 'files with concurrency 2');
+          const test = spawnSync(process.execPath, [
+            '--test', '--test-concurrency=2', '--test-reporter=tap', '--test-timeout=180000', ...included,
+          ], { stdio: 'inherit' });
+          if (test.error) throw test.error;
+          process.exitCode = test.status ?? 1;
+          JS
