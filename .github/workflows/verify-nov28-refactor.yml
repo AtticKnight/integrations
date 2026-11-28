@@ -25,6 +25,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
+      - name: Confirm the checkout matches the submission
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_REVISION"
+        env:
+          EXPECTED_REVISION: ${{ matrix.revision }}
       - run: npm ci
       - run: npm run check
       - run: npm test
