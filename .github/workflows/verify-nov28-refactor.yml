@@ -1,0 +1,72 @@
+name: Verify Atto submissions after the shared module refactor
+on:
+  push:
+    branches: [verify/nov28-upstream-refactor]
+permissions:
+  contents: read
+jobs:
+  linux:
+    name: ${{ matrix.feature }} on Linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: Native recipient approvals
+            revision: 2c6fb14477a4a07d16d32dac3f61be39d5803c8d
+          - feature: Confirmed payment verification
+            revision: 649a562b1051228e4605bfbc2631bf64c65118a5
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run test:integration
+      - run: npm run test:package
+        env:
+          ATTO_TEST_PACKAGE_INTEGRATION: '1'
+  windows:
+    name: Complete Windows suite, two concurrent files
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 2c6fb14477a4a07d16d32dac3f61be39d5803c8d
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.3'
+      - run: npm ci
+      - run: npm run build
+      - name: Run every platform-supported test file
+        shell: pwsh
+        run: |
+          @'
+          import { spawnSync } from 'node:child_process';
+          import { globSync, readFileSync } from 'node:fs';
+          import { relative, resolve } from 'node:path';
+          import { selectPlatformTests, reportPlatformExclusions } from './scripts/test-platform.mjs';
+          const { scripts } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const marker = 'node scripts/test.mjs ';
+          if (!scripts.test.includes(marker)) throw new Error('Unknown package test invocation');
+          const patterns = scripts.test.split(marker)[1].trim().split(/\s+/);
+          const files = globSync(patterns).map(file => relative(process.cwd(), resolve(file))).sort();
+          const { included, excluded } = selectPlatformTests(files);
+          if (!included.length) throw new Error('No test files selected');
+          reportPlatformExclusions(excluded);
+          console.log('Running', included.length, 'files with concurrency 2');
+          const test = spawnSync(process.execPath, [
+            '--test', '--test-concurrency=2', '--test-reporter=tap', '--test-timeout=180000', ...included,
+          ], { stdio: 'inherit' });
+          if (test.error) throw test.error;
+          process.exitCode = test.status ?? 1;
+          '@ | node --input-type=module -
+          exit $LASTEXITCODE
